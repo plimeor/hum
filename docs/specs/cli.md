@@ -16,5 +16,8 @@ The global `-y` flag MUST skip every confirmation prompt and count as agreeing.
 ### Requirement: Completion scripts
 `hum completion fish|zsh|bash` MUST print the completion script for that shell, and completion MUST offer the configured service names.
 
+### Requirement: Home directory is a real path
+When `$HOME` is a symbolic link or lies under one, every command that reads the config directory MUST fail and name the real path `$HOME` resolves to.
+
 ### Requirement: Exit status on failure
 When any command fails, it MUST print the reason to standard error and exit with a non-zero status.

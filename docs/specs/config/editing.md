@@ -25,6 +25,9 @@ When the first argument of `command` is not found in the global `PATH`, `hum new
 ### Requirement: Edits keep comments
 `hum set` and `hum unset` MUST change only the content of the target key; every other piece of text in the file, comments included, MUST stay unchanged.
 
+### Requirement: Edits follow symbolic links
+When the service config or global config that `edit`, `set`, or `unset` changes is a symbolic link, hum MUST write the change to the file the link resolves to and leave the link in place. When the link resolves to no file, the command MUST fail without writing anything.
+
 ### Requirement: Invalid results are not written
 When the result of `hum set` or `hum unset` is not a valid config, the command MUST fail and MUST NOT change the file.
 

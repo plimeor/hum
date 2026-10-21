@@ -93,6 +93,18 @@ impl Paths {
             .map(PathBuf::from)
             .or_else(std::env::home_dir)
             .context("cannot determine the home directory")?;
+        // launchd reports a job's plist by its real path, so every path hum
+        // builds from HOME has to be real for the two to compare equal.
+        if let Ok(real) = fs::canonicalize(&home)
+            && real != home
+        {
+            bail!(
+                "HOME {} resolves to {} through a symbolic link; set HOME to {} and run hum again",
+                home.display(),
+                real.display(),
+                real.display()
+            );
+        }
         let hum_home = match std::env::var("HUM_HOME") {
             Ok(h) if !h.is_empty() => Some(std::path::absolute(expand_path(&h, &home))?),
             _ => None,
@@ -205,8 +217,10 @@ pub fn contract_path(path: &Path, home: &Path) -> String {
 }
 
 /// Writes data to a temp file next to path, then renames it into place,
-/// keeping the existing file's permissions.
+/// keeping the existing file's permissions. When path is a symbolic link,
+/// the file it resolves to is replaced and the link stays.
 pub fn write_atomic(path: &Path, data: &[u8]) -> Result<()> {
+    let path = &resolve_link(path)?;
     let dir = path.parent().context("path has no parent")?;
     fs::create_dir_all(dir)?;
     let mut tmp = tempfile::NamedTempFile::new_in(dir)?;
@@ -219,6 +233,16 @@ pub fn write_atomic(path: &Path, data: &[u8]) -> Result<()> {
     tmp.persist(path)
         .with_context(|| format!("writing {}", path.display()))?;
     Ok(())
+}
+
+/// The file a symbolic link resolves to, or path itself when it is not a
+/// link. A link that resolves to no file is an error.
+fn resolve_link(path: &Path) -> Result<PathBuf> {
+    match fs::symlink_metadata(path) {
+        Ok(m) if m.file_type().is_symlink() => fs::canonicalize(path)
+            .with_context(|| format!("{} is a symbolic link to a missing file", path.display())),
+        _ => Ok(path.to_path_buf()),
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]

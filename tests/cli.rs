@@ -6,20 +6,23 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
 struct Home {
-    dir: tempfile::TempDir,
+    _dir: tempfile::TempDir,
+    // The temp dir's real path: hum refuses a HOME reached through a
+    // symbolic link, and macOS temp dirs sit under the /var link.
+    root: PathBuf,
 }
 
 impl Home {
     fn new() -> Self {
-        let home = Home {
-            dir: tempfile::tempdir().unwrap(),
-        };
+        let dir = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(dir.path()).unwrap();
+        let home = Home { _dir: dir, root };
         fs::create_dir_all(home.path().join("work")).unwrap();
         home
     }
 
     fn path(&self) -> &Path {
-        self.dir.path()
+        &self.root
     }
 
     fn service_file(&self, name: &str) -> PathBuf {
@@ -119,6 +122,69 @@ fn invalid_set_leaves_the_file_alone() {
     assert!(stderr(&o).contains("left unchanged"), "{}", stderr(&o));
     let after = fs::read_to_string(h.service_file("demo")).unwrap();
     assert_eq!(after, "command = [\"true\"]  # keep\n");
+}
+
+// Requirement: Edits follow symbolic links
+#[test]
+fn edits_write_through_symbolic_links() {
+    let h = Home::new();
+    let dotfiles = h.path().join("dotfiles");
+    fs::create_dir_all(&dotfiles).unwrap();
+    fs::create_dir_all(h.service_file("demo").parent().unwrap()).unwrap();
+    fs::write(dotfiles.join("demo.toml"), "command = [\"true\"]  # keep\n").unwrap();
+    std::os::unix::fs::symlink(dotfiles.join("demo.toml"), h.service_file("demo")).unwrap();
+    // Exit status not checked: after writing, `set` asks launchd about the
+    // service, which fails off macOS.
+    h.run(&["set", "demo", "restart=never"]);
+    assert!(
+        fs::symlink_metadata(h.service_file("demo"))
+            .unwrap()
+            .is_symlink()
+    );
+    let target = fs::read_to_string(dotfiles.join("demo.toml")).unwrap();
+    assert_eq!(
+        target,
+        "command = [\"true\"]  # keep\nrestart = \"never\"\n"
+    );
+
+    let global = h.path().join(".config/hum/config.toml");
+    fs::rename(&global, dotfiles.join("config.toml")).unwrap();
+    std::os::unix::fs::symlink("../../dotfiles/config.toml", &global).unwrap();
+    let o = h
+        .cmd(&["edit", "--global"])
+        .env("EDITOR", "sed -i.bak s/^#.keep.=.3/keep\\ =\\ 5/")
+        .output()
+        .unwrap();
+    assert!(o.status.success(), "{}", stderr(&o));
+    assert!(fs::symlink_metadata(&global).unwrap().is_symlink());
+    let target = fs::read_to_string(dotfiles.join("config.toml")).unwrap();
+    assert!(target.contains("\nkeep = 5\n"), "{target}");
+
+    fs::remove_file(dotfiles.join("demo.toml")).unwrap();
+    let o = h.run(&["set", "demo", "restart=always"]);
+    assert_eq!(o.status.code(), Some(1));
+    assert!(!dotfiles.join("demo.toml").exists());
+    assert!(
+        fs::symlink_metadata(h.service_file("demo"))
+            .unwrap()
+            .is_symlink()
+    );
+}
+
+// Requirement: Home directory is a real path, Exit status on failure
+#[test]
+fn a_home_reached_through_a_symbolic_link_is_refused() {
+    let h = Home::new();
+    let link = h.path().join("work/home-link");
+    std::os::unix::fs::symlink(h.path(), &link).unwrap();
+    let o = h.cmd(&["ls"]).env("HOME", &link).output().unwrap();
+    assert_eq!(o.status.code(), Some(1));
+    let err = stderr(&o);
+    assert!(
+        err.contains(&format!("set HOME to {}", h.path().display())),
+        "{err}"
+    );
+    assert!(!link.join(".config").exists(), "nothing created");
 }
 
 // Requirement: Edit in an editor, Global config changes restart nothing

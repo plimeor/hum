@@ -54,6 +54,49 @@ fn remove_if_exists(path: &Path) -> Result<()> {
     }
 }
 
+/// When the content behind path last changed: the latest of the file's
+/// modification time and that of every symbolic link met while resolving
+/// path, since pointing a link elsewhere changes the content without
+/// touching the new file. None when the file does not exist.
+fn last_change(path: &Path) -> Option<std::time::SystemTime> {
+    use std::path::Component;
+    let mut latest = fs::metadata(path).and_then(|m| m.modified()).ok()?;
+    let mut base = PathBuf::new();
+    let mut rest: Vec<std::ffi::OsString> = path
+        .components()
+        .rev()
+        .map(|c| c.as_os_str().to_owned())
+        .collect();
+    let mut links = 0;
+    while let Some(part) = rest.pop() {
+        match Path::new(&part).components().next() {
+            Some(Component::RootDir) => base = PathBuf::from("/"),
+            Some(Component::CurDir) => {}
+            Some(Component::ParentDir) => {
+                base.pop();
+            }
+            _ => {
+                let next = base.join(&part);
+                match fs::symlink_metadata(&next) {
+                    // metadata() above already rejected link loops; the
+                    // bound only keeps this loop finite if links change
+                    // underneath it.
+                    Ok(m) if m.file_type().is_symlink() && links < 40 => {
+                        links += 1;
+                        if let Ok(t) = m.modified() {
+                            latest = latest.max(t);
+                        }
+                        let target = fs::read_link(&next).ok()?;
+                        rest.extend(target.components().rev().map(|c| c.as_os_str().to_owned()));
+                    }
+                    _ => base = next,
+                }
+            }
+        }
+    }
+    Some(latest)
+}
+
 pub enum StartOutcome {
     AlreadyRunning { pid: Option<u32> },
     Started,
@@ -301,11 +344,7 @@ impl App {
         files.extend(s.resolved_env_files(&self.paths.home));
         let changed: Vec<String> = files
             .iter()
-            .filter(|f| {
-                fs::metadata(f)
-                    .and_then(|m| m.modified())
-                    .is_ok_and(|t| t > started)
-            })
+            .filter(|f| last_change(f).is_some_and(|t| t > started))
             .map(|f| config::contract_path(f, &self.paths.home))
             .collect();
         (!changed.is_empty()).then(|| format!("started before {} changed", changed.join(", ")))
@@ -1182,6 +1221,36 @@ mod tests {
         );
         f.app.restart(&n("x")).unwrap();
         assert!(!f.row("x").out_of_sync());
+    }
+
+    // Requirement: Flag mismatches with launchd
+    #[test]
+    fn pointing_an_env_file_link_at_an_older_file_is_flagged() {
+        let f = fixture();
+        let home = &f.app.paths.home;
+        fs::write(home.join("a.env"), "X=a\n").unwrap();
+        fs::write(home.join("old.env"), "X=old\n").unwrap();
+        fs::File::options()
+            .write(true)
+            .open(home.join("old.env"))
+            .unwrap()
+            .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_600_000_000))
+            .unwrap();
+        std::os::unix::fs::symlink(home.join("a.env"), home.join(".env")).unwrap();
+        f.write("x", "command = [\"sleep\", \"1\"]\nenv_file = [\".env\"]\n");
+        f.app.start(&n("x")).unwrap();
+        assert!(!f.row("x").out_of_sync());
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        fs::remove_file(home.join(".env")).unwrap();
+        std::os::unix::fs::symlink("old.env", home.join(".env")).unwrap();
+        let reason = match f.row("x").config {
+            ConfigState::Ok { out_of_sync, .. } => out_of_sync.unwrap(),
+            other => panic!("{other:?}"),
+        };
+        assert!(
+            reason.starts_with("started before") && reason.contains(".env"),
+            "{reason}"
+        );
     }
 
     // Requirement: When a service config change takes effect

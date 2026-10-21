@@ -14,7 +14,7 @@ Each service MUST be shown in exactly one state: `running`; `disabled` (stopped 
 `hum ls` MUST print one row for every service that has a config file or a hum plist, with the columns NAME, STATE, PID, LAST EXIT, COMMAND; a service whose config file is invalid MUST still be listed, with the error.
 
 ### Requirement: Flag mismatches with launchd
-When what runs does not match the config, `hum ls` MUST mark the service: the plist is missing or outdated, a plist has no config, the job was loaded from another path, or a running service started before its service config, the global config, or one of its env files last changed. `hum show` MUST say which of these applies.
+When what runs does not match the config, `hum ls` MUST mark the service: the plist is missing or outdated, a plist has no config, the job was loaded from another path, or a running service started before its service config, the global config, or one of its env files last changed. Pointing a symbolic link on such a file's path at another file counts as a change to that file. `hum show` MUST say which of these applies.
 
 ### Requirement: show output
 `hum show <name>` MUST print the full merged config (including the log rotation settings in effect), the launchd state, and every environment variable in effect together with the layer that set it (base variables, global `[env]`, which env file, or the service's `[env]`).
