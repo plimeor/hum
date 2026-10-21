@@ -4,8 +4,13 @@ version = "0.1.0"
 edition = "2024"
 description = "Run background commands as launchd services, configured by TOML files"
 license = "MIT OR Apache-2.0"
+repository = "https://github.com/plimeor/hum"
+homepage = "https://github.com/plimeor/hum"
 rust-version = "1.88"
 publish = false
+
+[package.metadata.dist]
+dist = true
 
 [dependencies]
 anyhow = "1.0.104"
@@ -19,4 +24,9 @@ serde_json = "1.0.154"
 tempfile = "3.27.0"
 toml = "1.1.8"
 toml_edit = "0.25.17"
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"
 
