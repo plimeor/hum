@@ -62,10 +62,11 @@ pub enum StartOutcome {
 pub enum ChangeOutcome {
     /// The running service was restarted.
     Restarted,
-    /// launchd has the job loaded and keeps the old definition until the
-    /// service restarts.
-    NeedsRestart,
-    /// The job is not loaded; its plist holds the new definition.
+    /// The change waits for a restart: the service is running with the
+    /// old config (`running`), or launchd holds the old definition of a job
+    /// that is loaded but not running.
+    NeedsRestart { running: bool },
+    /// Nothing waits: the service reads the new config when it next starts.
     Applied,
 }
 
@@ -224,23 +225,35 @@ impl App {
 
     /// Makes a config edit take effect.
     ///
-    /// A loaded job's plist is left as it is unless the job is restarted:
-    /// reloading it would also start it when `autostart` is set, and
-    /// leaving the old file keeps `hum ls` reporting the pending change.
-    /// A job that is not loaded just gets its plist rewritten.
+    /// A running service is restarted when `restart` is set. Otherwise the
+    /// change waits, and `hum ls` flags it: a running service started
+    /// before its config changed, and a loaded job keeps its plist as is,
+    /// because reloading it would also start it under `RunAtLoad`. A job
+    /// that is not loaded just gets its plist rewritten.
     pub fn apply_config_change(&self, name: &ServiceName, restart: bool) -> Result<ChangeOutcome> {
         let s = config::load_service(&self.paths, name)?;
         let st = self.ld.status(&label(name))?;
-        if st.running && restart {
+        if st.running {
+            if !restart {
+                return Ok(ChangeOutcome::NeedsRestart { running: true });
+            }
             self.restart(name)?;
             return Ok(ChangeOutcome::Restarted);
         }
+        let plist = self.paths.plist_file(name);
+        if !plist.exists() {
+            return Ok(ChangeOutcome::Applied);
+        }
+        let data = self.render_plist(&s);
         if st.loaded {
-            return Ok(ChangeOutcome::NeedsRestart);
+            // Only `autostart` and `restart` live in the plist; everything
+            // else is read by `hum run` at the next start.
+            if fs::read(&plist).is_ok_and(|cur| cur == data) {
+                return Ok(ChangeOutcome::Applied);
+            }
+            return Ok(ChangeOutcome::NeedsRestart { running: false });
         }
-        if self.paths.plist_file(name).exists() {
-            self.write_plist(name, &self.render_plist(&s))?;
-        }
+        self.write_plist(name, &data)?;
         Ok(ChangeOutcome::Applied)
     }
 
@@ -269,8 +282,35 @@ impl App {
         remove_if_exists(&self.paths.plist_file(ROTATE_NAME))
     }
 
-    /// Why launchd does not match the service's config, if it does not.
+    /// Why what runs does not match the service's config, if it does not:
+    /// launchd's definition differs, or the running process started before
+    /// one of its config files last changed.
     pub fn sync_reason(&self, s: &Service, st: &Status) -> Option<String> {
+        self.plist_reason(s, st)
+            .or_else(|| self.stale_reason(s, st))
+    }
+
+    /// The config files a running service read when it started that have
+    /// changed since. `hum run` reads them all at start, so any later
+    /// change waits for a restart.
+    fn stale_reason(&self, s: &Service, st: &Status) -> Option<String> {
+        let started = st.started_at.filter(|_| st.running)?;
+        let mut files = vec![self.paths.service_file(&s.name), self.paths.global_file()];
+        files.extend(s.resolved_env_files(&self.paths.home));
+        let changed: Vec<String> = files
+            .iter()
+            .filter(|f| {
+                fs::metadata(f)
+                    .and_then(|m| m.modified())
+                    .is_ok_and(|t| t > started)
+            })
+            .map(|f| config::contract_path(f, &self.paths.home))
+            .collect();
+        (!changed.is_empty()).then(|| format!("started before {} changed", changed.join(", ")))
+    }
+
+    /// Why launchd's definition of the job does not match the config.
+    fn plist_reason(&self, s: &Service, st: &Status) -> Option<String> {
         let plist_path = self.paths.plist_file(&s.name);
         let Ok(data) = fs::read(&plist_path) else {
             return Some("plist missing".into());
@@ -585,7 +625,7 @@ impl App {
                 }
             };
             let st = self.ld.status(&label(&name))?;
-            let Some(reason) = self.sync_reason(&s, &st) else {
+            let Some(reason) = self.plist_reason(&s, &st) else {
                 continue;
             };
             let kind = if self.paths.plist_file(&name).exists() {
@@ -763,7 +803,7 @@ impl App {
             if let Some(reason) = self.sync_reason(&s, &self.ld.status(&label(&name))?) {
                 problems.push((
                     Severity::Warn,
-                    format!("launchd out of sync ({reason}); run `hum apply`"),
+                    format!("out of sync with its config ({reason}); run `hum restart {name}`"),
                 ));
             }
             problems.extend(check_program(&self.paths.plist_file(&name)));
@@ -911,6 +951,7 @@ mod tests {
                 running: run_at_load,
                 pid: run_at_load.then_some(100),
                 path: Some(plist.display().to_string()),
+                started_at: run_at_load.then(std::time::SystemTime::now),
                 ..Default::default()
             };
             self.jobs.borrow_mut().insert(label.clone(), st);
@@ -939,6 +980,7 @@ mod tests {
                 self.log(format!("kickstart {label}"));
                 st.running = true;
                 st.pid = Some(200);
+                st.started_at = Some(std::time::SystemTime::now());
             }
             Ok(())
         }
@@ -1069,7 +1111,7 @@ mod tests {
         f.write("x", "command = [\"sleep\", \"1\"]\nrestart = \"never\"\n");
         f.take_calls();
         let outcome = f.app.apply_config_change(&n("x"), true).unwrap();
-        assert!(matches!(outcome, ChangeOutcome::NeedsRestart));
+        assert!(matches!(outcome, ChangeOutcome::NeedsRestart { .. }));
         assert!(f.take_calls().is_empty() && !f.status("x").running);
         assert!(f.row("x").out_of_sync(), "ls flags the pending change");
         f.app.start(&n("x")).unwrap();
@@ -1105,7 +1147,7 @@ mod tests {
         f.write("x", "command = [\"sleep\", \"1\"]\nautostart = false\n");
         f.take_calls();
         let outcome = f.app.apply_config_change(&n("x"), false).unwrap();
-        assert!(matches!(outcome, ChangeOutcome::NeedsRestart));
+        assert!(matches!(outcome, ChangeOutcome::NeedsRestart { .. }));
         assert!(
             f.take_calls().is_empty(),
             "--no-restart leaves launchd alone"
@@ -1118,6 +1160,60 @@ mod tests {
         assert!(matches!(outcome, ChangeOutcome::Restarted));
         assert!(f.loaded_def_current("x") && f.status("x").running);
         assert!(!f.row("x").out_of_sync());
+    }
+
+    // Requirement: When a service config change takes effect, Flag mismatches with launchd
+    #[test]
+    fn env_only_change_on_a_running_service_is_flagged_until_restart() {
+        // The plist does not hold the environment, so only the process's
+        // start time can show that it runs with the old config.
+        let f = fixture();
+        f.write("x", r#"command = ["sleep", "1"]"#);
+        f.app.start(&n("x")).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        f.write("x", "command = [\"sleep\", \"1\"]\n[env]\nPORT = \"1\"\n");
+        f.take_calls();
+        let outcome = f.app.apply_config_change(&n("x"), false).unwrap();
+        assert!(matches!(
+            outcome,
+            ChangeOutcome::NeedsRestart { running: true }
+        ));
+        assert!(f.take_calls().is_empty());
+        let reason = match f.row("x").config {
+            ConfigState::Ok { out_of_sync, .. } => out_of_sync.unwrap(),
+            other => panic!("{other:?}"),
+        };
+        assert!(
+            reason.starts_with("started before") && reason.contains("x.toml"),
+            "{reason}"
+        );
+        assert!(
+            f.app.plan().unwrap().0.is_empty(),
+            "apply has nothing to do for it"
+        );
+        f.app.restart(&n("x")).unwrap();
+        assert!(!f.row("x").out_of_sync());
+    }
+
+    // Requirement: When a service config change takes effect
+    #[test]
+    fn env_only_change_on_a_loaded_stopped_job_needs_nothing() {
+        let f = fixture();
+        f.write("x", "command = [\"sleep\", \"1\"]\nrestart = \"never\"\n");
+        f.app.start(&n("x")).unwrap();
+        f.ld.jobs.borrow_mut().get_mut("hum.x").unwrap().running = false;
+        f.write(
+            "x",
+            "command = [\"sleep\", \"1\"]\nrestart = \"never\"\n[env]\nX = \"1\"\n",
+        );
+        f.take_calls();
+        let outcome = f.app.apply_config_change(&n("x"), true).unwrap();
+        assert!(matches!(outcome, ChangeOutcome::Applied));
+        assert!(f.take_calls().is_empty() && !f.status("x").running);
+        assert!(
+            !f.row("x").out_of_sync(),
+            "the next start reads the new config"
+        );
     }
 
     // Requirement: Flag mismatches with launchd, apply aligns launchd, apply skips invalid configs

@@ -390,7 +390,12 @@ impl Ctx {
     fn report_change(&self, name: &ServiceName, outcome: ChangeOutcome) {
         match outcome {
             ChangeOutcome::Restarted => println!("{name}: restarted"),
-            ChangeOutcome::NeedsRestart => {
+            ChangeOutcome::NeedsRestart { running: true } => {
+                println!(
+                    "{name}: still running with the old config; run `hum restart {name}` to apply"
+                )
+            }
+            ChangeOutcome::NeedsRestart { running: false } => {
                 println!(
                     "{name}: launchd keeps the old definition; run `hum restart {name}` to apply"
                 )
@@ -685,7 +690,9 @@ impl Ctx {
             .collect();
         print_table(&["NAME", "STATE", "PID", "LAST EXIT", "COMMAND"], &table);
         if rows.iter().any(|r| r.out_of_sync()) {
-            println!("\n* launchd does not match the config; run `hum apply`");
+            println!(
+                "\n* not in sync with its config: `hum show <name>` says why; `hum apply` removes plists without a config"
+            );
         }
         Ok(())
     }
@@ -728,7 +735,7 @@ impl Ctx {
         if let Some(reason) = &r.out_of_sync {
             info.push([
                 "launchd".into(),
-                format!("{reason}; run `hum apply` or `hum restart {name}`"),
+                format!("{reason}; run `hum restart {name}` to apply"),
             ]);
         }
         print_table(&[], &info);

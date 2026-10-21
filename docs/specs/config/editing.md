@@ -29,7 +29,7 @@ When the first argument of `command` is not found in the global `PATH`, `hum new
 When the result of `hum set` or `hum unset` is not a valid config, the command MUST fail and MUST NOT change the file.
 
 ### Requirement: When a service config change takes effect
-After `edit`, `set`, or `unset` changes a service config, hum MUST restart the service automatically if it is running. With `--no-restart`, or when launchd has the job loaded but it is not running, hum MUST NOT restart or start it, MUST say that a restart is needed for the change to take effect, and until then `hum ls` MUST flag the service as out of sync with launchd.
+After `edit`, `set`, or `unset` changes a service config, hum MUST restart the service automatically if it is running; with `--no-restart` it MUST NOT restart it and MUST say that a restart is needed. When launchd has the job loaded but not running and the change alters what launchd holds (`autostart` or `restart`), hum MUST NOT start the service and MUST say that a restart is needed; any other change takes effect when the service next starts. Until a waiting change takes effect, `hum ls` MUST flag the service.
 
 ### Requirement: Global config changes restart nothing
 After `hum edit --global` changes the global config, hum MUST NOT restart any service and MUST print one line saying the change takes effect when each service next restarts.

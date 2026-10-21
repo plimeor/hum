@@ -4,7 +4,7 @@
 use std::collections::HashSet;
 use std::path::Path;
 use std::process::Command;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{Result, bail};
 
@@ -20,6 +20,9 @@ pub struct Status {
     pub last_exit: Option<i32>,
     /// e.g. "Killed: 9".
     pub last_signal: Option<String>,
+    /// When the running process started. `hum run` execs the service, so
+    /// this is when the service read its config.
+    pub started_at: Option<SystemTime>,
 }
 
 impl Status {
@@ -126,7 +129,11 @@ impl Launchctl {
 impl Manager for Launchctl {
     fn status(&self, label: &str) -> Result<Status> {
         match self.run(&["print", &self.target(label)])? {
-            Ok(out) => Ok(parse_print(&out)),
+            Ok(out) => {
+                let mut st = parse_print(&out);
+                st.started_at = st.pid.and_then(process_start_time);
+                Ok(st)
+            }
             Err((EXIT_NO_SUCH_SERVICE, _)) => Ok(Status::default()),
             Err((code, msg)) => bail!("launchctl print {label}: {msg} (exit {code})"),
         }
@@ -179,6 +186,32 @@ impl Manager for Launchctl {
     fn kickstart(&self, label: &str) -> Result<()> {
         self.checked(&["kickstart", &self.target(label)]).map(drop)
     }
+}
+
+/// When the process started, from the kernel's process table.
+#[cfg(target_os = "macos")]
+fn process_start_time(pid: u32) -> Option<SystemTime> {
+    let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+    let size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
+    let n = unsafe {
+        libc::proc_pidinfo(
+            pid as libc::c_int,
+            libc::PROC_PIDTBSDINFO,
+            0,
+            (&mut info as *mut libc::proc_bsdinfo).cast(),
+            size,
+        )
+    };
+    (n == size).then(|| {
+        SystemTime::UNIX_EPOCH
+            + Duration::from_secs(info.pbi_start_tvsec)
+            + Duration::from_micros(info.pbi_start_tvusec)
+    })
+}
+
+#[cfg(not(target_os = "macos"))]
+fn process_start_time(_pid: u32) -> Option<SystemTime> {
+    None
 }
 
 /// Parses the top-level fields of `launchctl print` (lines indented by
@@ -348,6 +381,10 @@ mod macos {
         let st = ld.status(&j.label).unwrap();
         assert!(st.loaded && st.pid.is_some());
         assert_eq!(st.path.as_deref(), Some(&*j.plist.to_string_lossy()));
+        let age = SystemTime::now()
+            .duration_since(st.started_at.unwrap())
+            .unwrap();
+        assert!(age < Duration::from_secs(30), "start time {age:?} ago");
         ld.bootout(&j.label).unwrap();
         assert!(
             !ld.status(&j.label).unwrap().loaded,
