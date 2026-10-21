@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>hum._rotate</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/opt/homebrew/bin/hum</string>
+		<string>logs</string>
+		<string>--rotate</string>
+		<string>--all</string>
+		<string>--if-oversize</string>
+	</array>
+	<key>RunAtLoad</key>
+	<false/>
+	<key>StartInterval</key>
+	<integer>3600</integer>
+	<key>StandardOutPath</key>
+	<string>/Users/me/Library/Logs/hum/_rotate.log</string>
+	<key>StandardErrorPath</key>
+	<string>/Users/me/Library/Logs/hum/_rotate.log</string>
+</dict>
+</plist>

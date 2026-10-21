@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>hum.t3</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/opt/homebrew/bin/hum</string>
+		<string>run</string>
+		<string>t3</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<true/>
+	<key>StandardOutPath</key>
+	<string>/Users/me/Library/Logs/hum/t3.log</string>
+	<key>StandardErrorPath</key>
+	<string>/Users/me/Library/Logs/hum/t3.log</string>
+</dict>
+</plist>
