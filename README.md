@@ -49,7 +49,7 @@ keep = 3
 | `[env]` | `{}` | Values are taken literally, with no expansion |
 | `[log]` | global | `max_size` uses powers of 1024; `keep` is how many old copies to keep |
 
-Unknown fields and illegal values are errors, and an invalid file is never partly applied. The global config, `~/.config/hum/config.toml`, has only `[env]` and `[log]`, shared by every service. Set `$HUM_HOME` to keep the config directory somewhere else.
+Unknown fields and illegal values are errors, and an invalid file is never partly applied. The global config, `~/.config/hum/config.toml`, has only `[env]` and `[log]`, shared by every service.
 
 ### Environment
 

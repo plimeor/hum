@@ -78,13 +78,10 @@ pub fn label(name: &str) -> String {
 #[derive(Clone, Debug)]
 pub struct Paths {
     pub home: PathBuf,
-    /// `~/.config/hum`, or `$HUM_HOME`.
+    /// `~/.config/hum`.
     pub config_dir: PathBuf,
     pub launch_agents: PathBuf,
     pub log_dir: PathBuf,
-    /// `$HUM_HOME` when set; passed on to launchd jobs so `hum run` reads
-    /// the same directory.
-    pub hum_home: Option<PathBuf>,
 }
 
 impl Paths {
@@ -105,19 +102,14 @@ impl Paths {
                 real.display()
             );
         }
-        let hum_home = match std::env::var("HUM_HOME") {
-            Ok(h) if !h.is_empty() => Some(std::path::absolute(expand_path(&h, &home))?),
-            _ => None,
-        };
-        Ok(Self::with_home(home, hum_home))
+        Ok(Self::with_home(home))
     }
 
-    pub fn with_home(home: PathBuf, hum_home: Option<PathBuf>) -> Self {
+    pub fn with_home(home: PathBuf) -> Self {
         Paths {
-            config_dir: hum_home.clone().unwrap_or_else(|| home.join(".config/hum")),
+            config_dir: home.join(".config/hum"),
             launch_agents: home.join("Library/LaunchAgents"),
             log_dir: home.join("Library/Logs/hum"),
-            hum_home,
             home,
         }
     }
@@ -777,7 +769,7 @@ mod tests {
     #[test]
     fn global_is_created_once_with_path() {
         let dir = tempfile::tempdir().unwrap();
-        let p = Paths::with_home(dir.path().into(), None);
+        let p = Paths::with_home(dir.path().into());
         assert!(ensure_global(&p, "/opt/homebrew/bin:/usr/bin").unwrap());
         assert_eq!(
             load_global(&p).unwrap().env["PATH"],

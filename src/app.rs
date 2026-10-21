@@ -122,14 +122,6 @@ impl App {
         })
     }
 
-    fn job_env(&self) -> BTreeMap<String, String> {
-        self.paths
-            .hum_home
-            .iter()
-            .map(|h| ("HUM_HOME".to_string(), h.display().to_string()))
-            .collect()
-    }
-
     fn log_path(&self, name: &str) -> Option<String> {
         Some(self.paths.log_file(name).display().to_string())
     }
@@ -143,7 +135,6 @@ impl App {
         plist::render(&plist::Job {
             label: label(&s.name),
             program_arguments: vec![hum_path.into(), "run".into(), s.name.to_string()],
-            environment_variables: self.job_env(),
             // Login brings a service back unless `hum stop` disabled it.
             run_at_load: true,
             keep_alive: match s.restart {
@@ -165,7 +156,6 @@ impl App {
         plist::render(&plist::Job {
             label: label(ROTATE_NAME),
             program_arguments: args,
-            environment_variables: self.job_env(),
             start_interval: Some(ROTATE_INTERVAL),
             standard_out_path: self.log_path(ROTATE_NAME),
             standard_error_path: self.log_path(ROTATE_NAME),
@@ -1033,7 +1023,7 @@ mod tests {
 
     fn fixture() -> Fixture {
         let dir = tempfile::tempdir().unwrap();
-        let paths = Paths::with_home(dir.path().into(), None);
+        let paths = Paths::with_home(dir.path().into());
         config::ensure_global(&paths, "/usr/bin:/bin").unwrap();
         let ld: &'static FakeLd = Box::leak(Box::default());
         Fixture {

@@ -1,8 +1,6 @@
 //! Renders launchd property lists. Output is deterministic, so comparing
 //! bytes tells whether a plist on disk is current.
 
-use std::collections::BTreeMap;
-
 use serde::{Deserialize, Serialize};
 
 /// One launchd job.
@@ -11,8 +9,6 @@ use serde::{Deserialize, Serialize};
 pub struct Job {
     pub label: String,
     pub program_arguments: Vec<String>,
-    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
-    pub environment_variables: BTreeMap<String, String>,
     pub run_at_load: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub keep_alive: Option<KeepAlive>,
@@ -90,18 +86,14 @@ mod tests {
         );
     }
 
-    // Requirement: Restart policy, Config directory location
+    // Requirement: Restart policy
     #[test]
-    fn on_failure_with_hum_home() {
+    fn on_failure() {
         golden(
             "on-failure.plist",
             &Job {
                 label: "hum.api".into(),
                 program_arguments: vec!["/opt/homebrew/bin/hum".into(), "run".into(), "api".into()],
-                environment_variables: BTreeMap::from([(
-                    "HUM_HOME".into(),
-                    "/Users/me/dot & files/hum".into(),
-                )]),
                 run_at_load: true,
                 keep_alive: Some(KeepAlive::OnFailure {
                     successful_exit: false,

@@ -10,11 +10,6 @@
 		<string>run</string>
 		<string>api</string>
 	</array>
-	<key>EnvironmentVariables</key>
-	<dict>
-		<key>HUM_HOME</key>
-		<string>/Users/me/dot &amp; files/hum</string>
-	</dict>
 	<key>RunAtLoad</key>
 	<true/>
 	<key>KeepAlive</key>

@@ -171,6 +171,21 @@ fn edits_write_through_symbolic_links() {
     );
 }
 
+// Requirement: Config directory location
+#[test]
+fn the_config_directory_is_always_under_home() {
+    let h = Home::new();
+    let elsewhere = h.path().join("elsewhere");
+    let o = h
+        .cmd(&["new", "demo", "--no-start", "--", "true"])
+        .env("HUM_HOME", &elsewhere)
+        .output()
+        .unwrap();
+    assert!(o.status.success(), "{}", stderr(&o));
+    assert!(h.service_file("demo").exists());
+    assert!(!elsewhere.exists());
+}
+
 // Requirement: Home directory is a real path, Exit status on failure
 #[test]
 fn a_home_reached_through_a_symbolic_link_is_refused() {

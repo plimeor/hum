@@ -22,7 +22,7 @@ Type: format
 A service config MUST live at `services/<name>.toml` in the config directory; the service name is taken from the file name and MUST match `[a-z0-9][a-z0-9_-]*`.
 
 ### Requirement: Config directory location
-The config directory MUST default to `~/.config/hum`; when `$HUM_HOME` is set it MUST be used instead, and `hum run` started by launchd MUST read the same directory.
+The config directory MUST be `~/.config/hum` under the user's home directory, for every command including `hum run` started by launchd; no environment variable or flag moves it.
 
 ### Requirement: Strict parsing
 hum MUST reject a config file with an unknown field, a type mismatch, or an illegal value, and the error MUST name the field or position at fault; an invalid file MUST NOT be partly applied.
