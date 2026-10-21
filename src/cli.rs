@@ -844,7 +844,7 @@ impl Ctx {
                 println!("nothing to do");
             }
             for a in &actions {
-                println!("would {} {} ({})", a.kind.as_str(), a.name, a.reason);
+                println!("would {} {} ({})", a.kind.as_str(), a.subject, a.reason);
             }
             return Ok(());
         }
@@ -853,9 +853,8 @@ impl Ctx {
         }
         for a in &actions {
             self.app.apply_action(a)?;
-            println!("{}: {} ({})", a.name, a.kind.as_str(), a.reason);
+            println!("{}: {} ({})", a.subject, a.kind.as_str(), a.reason);
         }
-        self.app.finish_apply()?;
         if problems.is_empty() {
             Ok(())
         } else {

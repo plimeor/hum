@@ -168,7 +168,11 @@ impl App {
     }
 
     fn render_rotate_plist(&self) -> Vec<u8> {
-        let mut args = vec![self.hum_path.clone()];
+        self.render_rotate_plist_with(&self.hum_path)
+    }
+
+    fn render_rotate_plist_with(&self, hum_path: &str) -> Vec<u8> {
+        let mut args = vec![hum_path.to_string()];
         args.extend(ROTATE_ARGS.map(String::from));
         plist::render(&plist::Job {
             label: label(ROTATE_NAME),
@@ -330,6 +334,10 @@ impl App {
         if !self.paths.service_files()?.is_empty() {
             return Ok(());
         }
+        self.remove_rotate_job()
+    }
+
+    fn remove_rotate_job(&self) -> Result<()> {
         self.ld.bootout(&label(ROTATE_NAME))?;
         remove_if_exists(&self.paths.plist_file(ROTATE_NAME))
     }
@@ -369,16 +377,27 @@ impl App {
 
     /// Why launchd's definition of the job does not match the config.
     fn plist_reason(&self, s: &Service, st: &Status) -> Option<String> {
-        let plist_path = self.paths.plist_file(&s.name);
+        self.definition_reason(&s.name, st, |prog| self.render_plist_with(s, prog))
+    }
+
+    /// Why the job's plist on disk, or the definition launchd loaded, is
+    /// not what `render` produces with this hum's path.
+    fn definition_reason(
+        &self,
+        name: &str,
+        st: &Status,
+        render: impl Fn(&str) -> Vec<u8>,
+    ) -> Option<String> {
+        let plist_path = self.paths.plist_file(name);
         let Ok(data) = fs::read(&plist_path) else {
             return Some("plist missing".into());
         };
-        if data != self.render_plist(s) {
+        if data != render(&self.hum_path) {
             // Name the hum path when it is the only difference: running a
             // different hum binary (a dev build) makes every plist differ.
             if let Some(prog) = plist::program(&data)
                 && prog != self.hum_path
-                && data == self.render_plist_with(s, &prog)
+                && data == render(&prog)
             {
                 return Some(format!("plist runs {prog}, this hum is {}", self.hum_path));
             }
@@ -388,6 +407,43 @@ impl App {
             Some(p) if st.loaded && Path::new(p) != plist_path => Some(format!("loaded from {p}")),
             _ => None,
         }
+    }
+
+    /// What `apply` has to do so the rotate job exists exactly when some
+    /// service config does, and matches this hum.
+    fn rotate_action(&self) -> Result<Option<Action>> {
+        let st = self.ld.status(&label(ROTATE_NAME))?;
+        let installed = self.paths.plist_file(ROTATE_NAME).exists();
+        let action = |kind, reason: &str| {
+            Some(Action {
+                kind,
+                subject: Subject::RotateJob,
+                reason: reason.into(),
+            })
+        };
+        if self.paths.service_files()?.is_empty() {
+            return Ok(if installed || st.loaded {
+                action(ActionKind::Unregister, "no service configs left")
+            } else {
+                None
+            });
+        }
+        if !installed {
+            return Ok(action(
+                ActionKind::Register,
+                "log rotation job not installed",
+            ));
+        }
+        if let Some(reason) =
+            self.definition_reason(ROTATE_NAME, &st, |prog| self.render_rotate_plist_with(prog))
+        {
+            return Ok(action(ActionKind::Update, &reason));
+        }
+        Ok(if st.loaded {
+            None
+        } else {
+            action(ActionKind::Register, "log rotation job not loaded")
+        })
     }
 }
 
@@ -650,10 +706,27 @@ impl ActionKind {
     }
 }
 
+/// The launchd job an action is about.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Subject {
+    Service(ServiceName),
+    /// hum's log rotation job.
+    RotateJob,
+}
+
+impl std::fmt::Display for Subject {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Subject::Service(name) => write!(f, "{name}"),
+            Subject::RotateJob => f.write_str(ROTATE_NAME),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Action {
     pub kind: ActionKind,
-    pub name: ServiceName,
+    pub subject: Subject,
     /// Why the action is needed.
     pub reason: String,
 }
@@ -689,27 +762,41 @@ impl App {
             } else {
                 ActionKind::Register
             };
-            actions.push(Action { kind, name, reason });
+            actions.push(Action {
+                kind,
+                subject: Subject::Service(name),
+                reason,
+            });
         }
         for name in self.paths.plist_names()? {
             if !configured.contains(&name) {
                 actions.push(Action {
                     kind: ActionKind::Unregister,
-                    name,
+                    subject: Subject::Service(name),
                     reason: "plist without config".into(),
                 });
             }
         }
+        actions.extend(self.rotate_action()?);
         Ok((actions, problems))
     }
 
     /// Carries out one planned action.
     pub fn apply_action(&self, act: &Action) -> Result<()> {
-        let label = label(&act.name);
+        let name = match &act.subject {
+            Subject::Service(name) => name,
+            Subject::RotateJob => {
+                return match act.kind {
+                    ActionKind::Register | ActionKind::Update => self.ensure_rotate_job(),
+                    ActionKind::Unregister => self.remove_rotate_job(),
+                };
+            }
+        };
+        let label = label(name);
         match act.kind {
             ActionKind::Register | ActionKind::Update => {
-                let s = config::load_service(&self.paths, &act.name)?;
-                let st = self.install(&act.name, &self.render_plist(&s))?;
+                let s = config::load_service(&self.paths, name)?;
+                let st = self.install(name, &self.render_plist(&s))?;
                 // A service `hum stop` disabled keeps only its plist, so
                 // it stays stopped until `hum start`.
                 if act.kind == ActionKind::Register
@@ -717,24 +804,15 @@ impl App {
                     && !self.ld.disabled()?.contains(&label)
                 {
                     self.ld.enable(&label)?;
-                    self.ld.bootstrap(&self.paths.plist_file(&act.name))?;
+                    self.ld.bootstrap(&self.paths.plist_file(name))?;
                 }
                 Ok(())
             }
             ActionKind::Unregister => {
                 self.ld.bootout(&label)?;
                 self.ld.enable(&label)?;
-                remove_if_exists(&self.paths.plist_file(&act.name))
+                remove_if_exists(&self.paths.plist_file(name))
             }
-        }
-    }
-
-    /// Installs or removes the rotate job after `apply`.
-    pub fn finish_apply(&self) -> Result<()> {
-        if self.paths.service_files()?.is_empty() {
-            self.prune_rotate_job()
-        } else {
-            self.ensure_rotate_job()
         }
     }
 }
@@ -1369,7 +1447,7 @@ mod tests {
         assert_eq!(problems.len(), 2);
         let summary: Vec<_> = actions
             .iter()
-            .map(|x| format!("{} {}", x.kind.as_str(), x.name))
+            .map(|x| format!("{} {}", x.kind.as_str(), x.subject))
             .collect();
         assert_eq!(
             summary,
@@ -1378,7 +1456,6 @@ mod tests {
         for act in &actions {
             a.apply_action(act).unwrap();
         }
-        a.finish_apply().unwrap();
         assert!(
             f.status("changed").running,
             "running service keeps running after reload"
@@ -1387,6 +1464,66 @@ mod tests {
         assert!(f.status("new1").running, "registered and started");
         assert!(!f.status("orphan").loaded);
         assert!(!a.paths.plist_file("orphan").exists());
+        assert!(a.plan().unwrap().0.is_empty());
+    }
+
+    // Requirement: apply aligns launchd, apply dry run
+    #[test]
+    fn apply_plans_the_rotate_job() {
+        let f = fixture();
+        let a = &f.app;
+        let rotate = |app: &App| -> Vec<String> {
+            app.plan()
+                .unwrap()
+                .0
+                .iter()
+                .filter(|x| x.subject == Subject::RotateJob)
+                .map(|x| format!("{} {}", x.kind.as_str(), x.reason))
+                .collect()
+        };
+        assert!(rotate(a).is_empty(), "no services, no rotate job");
+
+        f.write("x", r#"command = ["sleep", "1"]"#);
+        a.start(&n("x")).unwrap();
+        assert!(rotate(a).is_empty());
+
+        let dev = App {
+            paths: a.paths.clone(),
+            ld: Box::new(f.ld),
+            hum_path: "/src/hum/target/release/hum".into(),
+        };
+        assert!(
+            rotate(&dev).contains(
+                &"update plist runs /opt/homebrew/bin/hum, this hum is /src/hum/target/release/hum"
+                    .to_string()
+            ),
+            "{:?}",
+            rotate(&dev)
+        );
+
+        f.ld.bootout(&label(ROTATE_NAME)).unwrap();
+        assert_eq!(rotate(a), ["register log rotation job not loaded"]);
+        fs::remove_file(a.paths.plist_file(ROTATE_NAME)).unwrap();
+        let (actions, _) = a.plan().unwrap();
+        assert_eq!(rotate(a), ["register log rotation job not installed"]);
+        for act in &actions {
+            a.apply_action(act).unwrap();
+        }
+        assert!(f.status(ROTATE_NAME).loaded);
+        assert!(rotate(a).is_empty());
+
+        fs::remove_file(a.paths.service_file(&n("x"))).unwrap();
+        let (actions, _) = a.plan().unwrap();
+        let summary: Vec<_> = actions
+            .iter()
+            .map(|x| format!("{} {}", x.kind.as_str(), x.subject))
+            .collect();
+        assert_eq!(summary, ["unregister x", "unregister _rotate"]);
+        for act in &actions {
+            a.apply_action(act).unwrap();
+        }
+        assert!(!f.status(ROTATE_NAME).loaded);
+        assert!(!a.paths.plist_file(ROTATE_NAME).exists());
         assert!(a.plan().unwrap().0.is_empty());
     }
 
