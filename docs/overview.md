@@ -22,7 +22,7 @@ v1: macOS only (arm64 / x64), all 14 commands. The code and tests are done, and 
 - Build the Rust version and run the real-launchd tests: `cargo test -- --ignored --test-threads=1 launchd::macos`.
 - Local integration: after `hum new sleeper -- sleep 1000`, `ls` shows running; after `kill -9` it is started again within about 10 seconds; after `stop` it is not started again; after `rm` both the plist and the config are gone.
 - Environment: a service run by launchd and the same service run with `hum run` in the foreground see the same environment.
-- Login and upgrades: after logging out and back in, services with `autostart = true` start and stopped ones do not; after upgrading hum with brew, services still restart normally.
+- Login and upgrades: after logging out and back in, started services come back and stopped ones do not; after upgrading hum with brew, services still restart normally.
 
 ## Next
 

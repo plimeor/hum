@@ -16,7 +16,7 @@
 		<string>/Users/me/dot &amp; files/hum</string>
 	</dict>
 	<key>RunAtLoad</key>
-	<false/>
+	<true/>
 	<key>KeepAlive</key>
 	<dict>
 		<key>SuccessfulExit</key>

@@ -3,7 +3,7 @@ Type: format
 
 ## Purpose
 
-`services/<name>.toml` describes one service: what it runs, where, with which environment, whether it starts at login, and whether it is restarted after it exits. It is the service's single source of truth; the launchd plist is generated from it. Owned by the config module.
+`services/<name>.toml` describes one service: what it runs, where, with which environment, and whether it is restarted after it exits. It is the service's single source of truth; the launchd plist is generated from it. Owned by the config module.
 
 ## Fields
 | Field | Type | Default | When invalid |
@@ -11,7 +11,6 @@ Type: format
 | `command` | array of strings (argv), or a string (run through `/bin/sh -c`) | required | The whole file is invalid when it is missing, an empty array, an empty string, or holds a non-string element |
 | `cwd` | path string; `~` and `$HOME` are expanded | empty, meaning the user's home directory | The file is invalid on a type mismatch; a directory that does not exist does not affect parsing and fails at `hum run` |
 | `env_file` | array of path strings, relative to `cwd`; `~` and `$HOME` are expanded | `[]` | The file is invalid when an entry is an empty string |
-| `autostart` | boolean | `true` | The file is invalid on a type mismatch |
 | `restart` | `always` \| `on-failure` \| `never` | `always` | The file is invalid on any other value |
 | `[env]` | table of string to string; values are taken literally | `{}` | The file is invalid when a value is not a string or a key does not match `[A-Za-z_][A-Za-z0-9_]*` |
 | `[log].max_size` | size string such as `"10MB"`; units `B`/`K`/`KB`/`M`/`MB`/`G`/`GB`, powers of 1024 | inherited from the global config | The file is invalid when it cannot be parsed or is not positive |

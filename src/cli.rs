@@ -83,9 +83,6 @@ enum Cmd {
         /// Restart policy
         #[arg(long, value_enum, default_value_t = RestartArg::Always)]
         restart: RestartArg,
-        /// Do not start at login
-        #[arg(long)]
-        no_autostart: bool,
         /// Write the config without starting the service
         #[arg(long)]
         no_start: bool,
@@ -227,7 +224,6 @@ pub fn run(cli: Cli) -> Result<()> {
             env,
             env_file,
             restart,
-            no_autostart,
             no_start,
             command,
         } => {
@@ -236,7 +232,7 @@ pub fn run(cli: Cli) -> Result<()> {
                 RestartArg::OnFailure => Restart::OnFailure,
                 RestartArg::Never => Restart::Never,
             };
-            let s = ctx.new_service(name, cwd, &env, env_file, restart, !no_autostart, command)?;
+            let s = ctx.new_service(name, cwd, &env, env_file, restart, command)?;
             if no_start {
                 ctx.app.write_new_plist(&s)
             } else {
@@ -405,7 +401,6 @@ impl Ctx {
     }
 
     /// Writes a new service config; returns it for starting.
-    #[allow(clippy::too_many_arguments)]
     fn new_service(
         &self,
         name: ServiceName,
@@ -413,7 +408,6 @@ impl Ctx {
         env: &[String],
         env_file: Vec<String>,
         restart: Restart,
-        autostart: bool,
         command: Vec<String>,
     ) -> Result<Service> {
         let paths = &self.app.paths;
@@ -438,7 +432,6 @@ impl Ctx {
             command: Command::Argv(command),
             cwd: Some(config::contract_path(&cwd, &paths.home)),
             env_file,
-            autostart,
             restart,
             env: vars,
             log: Default::default(),
@@ -722,7 +715,6 @@ impl Ctx {
             info.push(["env_file".into(), files.join(", ")]);
         }
         info.extend([
-            ["autostart".into(), r.autostart.to_string()],
             ["restart".into(), r.restart.as_str().into()],
             [
                 "log rotate".into(),

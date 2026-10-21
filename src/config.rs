@@ -273,7 +273,6 @@ struct RawService {
     cwd: Option<String>,
     #[serde(default)]
     env_file: Vec<String>,
-    autostart: Option<bool>,
     restart: Option<Restart>,
     #[serde(default)]
     env: BTreeMap<String, String>,
@@ -297,7 +296,6 @@ pub struct Service {
     /// As written; `None` means `$HOME`.
     pub cwd: Option<String>,
     pub env_file: Vec<String>,
-    pub autostart: bool,
     pub restart: Restart,
     pub env: BTreeMap<String, String>,
     pub log: LogSettings,
@@ -377,7 +375,6 @@ pub fn parse_service(name: &ServiceName, text: &str) -> Result<Service> {
         command,
         cwd: raw.cwd,
         env_file: raw.env_file,
-        autostart: raw.autostart.unwrap_or(true),
         restart: raw.restart.unwrap_or(Restart::Always),
         env: raw.env,
         log,
@@ -494,7 +491,6 @@ pub fn parse_size(s: &str) -> Result<u64> {
 #[derive(Clone, Copy)]
 enum ValueKind {
     Str,
-    Bool,
     Int,
     /// Comma-separated list of strings.
     List,
@@ -502,11 +498,10 @@ enum ValueKind {
 
 /// Keys of a service config that `hum set` / `hum unset` accept, besides
 /// `env.<NAME>`. Kept next to `RawService` so the two change together.
-const EDIT_KEYS: [(&str, ValueKind); 7] = [
+const EDIT_KEYS: [(&str, ValueKind); 6] = [
     ("command", ValueKind::Str),
     ("cwd", ValueKind::Str),
     ("env_file", ValueKind::List),
-    ("autostart", ValueKind::Bool),
     ("restart", ValueKind::Str),
     ("log.max_size", ValueKind::Str),
     ("log.keep", ValueKind::Int),
@@ -544,10 +539,6 @@ impl EditKey {
         let key = self.path.join(".");
         Ok(match self.kind {
             ValueKind::Str => raw.into(),
-            ValueKind::Bool => raw
-                .parse::<bool>()
-                .map_err(|_| anyhow::anyhow!("{key}: expected true or false, got {raw:?}"))?
-                .into(),
             ValueKind::Int => raw
                 .parse::<i64>()
                 .map_err(|_| anyhow::anyhow!("{key}: expected an integer, got {raw:?}"))?
@@ -575,7 +566,6 @@ pub fn render_service(s: &Service) -> String {
     if !s.env_file.is_empty() {
         doc["env_file"] = toml_edit::value(s.env_file.iter().collect::<toml_edit::Array>());
     }
-    doc["autostart"] = toml_edit::value(s.autostart);
     doc["restart"] = toml_edit::value(s.restart.as_str());
     if !s.env.is_empty() {
         let mut env = toml_edit::Table::new();
@@ -598,7 +588,6 @@ mod tests {
     #[test]
     fn defaults() {
         let s = parse_service(&n("t3"), r#"command = ["t3", "server"]"#).unwrap();
-        assert!(s.autostart);
         assert_eq!(s.restart, Restart::Always);
         assert_eq!(s.argv(), ["t3", "server"]);
     }
@@ -684,7 +673,6 @@ mod tests {
             ("command", "echo hi"),
             ("cwd", "/tmp"),
             ("env_file", ".env, b.env"),
-            ("autostart", "false"),
             ("restart", "never"),
             ("log.max_size", "1MB"),
             ("log.keep", "2"),
@@ -700,7 +688,6 @@ mod tests {
         let s = parse_service(&n("x"), &doc.to_string()).unwrap();
         assert_eq!(s.command, Command::Shell("echo hi".into()));
         assert_eq!(s.env_file, [".env", "b.env"]);
-        assert!(!s.autostart);
         assert_eq!(s.restart, Restart::Never);
         assert_eq!(
             s.log,
@@ -712,7 +699,8 @@ mod tests {
         assert_eq!(s.env["PORT"], "1");
         assert!(EditKey::parse("port").is_err());
         assert!(EditKey::parse("env.A-B").is_err());
-        assert!(EditKey::parse("autostart").unwrap().value("yes").is_err());
+        assert!(EditKey::parse("log.keep").unwrap().value("many").is_err());
+        assert!(EditKey::parse("autostart").is_err());
     }
 
     // Requirement: Path expansion
@@ -749,7 +737,6 @@ mod tests {
             command: Command::Argv(vec!["bun".into(), "run".into(), "start \"x\"".into()]),
             cwd: Some("~/work/api".into()),
             env_file: vec![".env".into()],
-            autostart: false,
             restart: Restart::OnFailure,
             env: BTreeMap::from([("PORT".into(), "4000".into()), ("B".into(), "a\\b".into())]),
             log: LogSettings::default(),
@@ -759,7 +746,6 @@ mod tests {
         assert_eq!(got.cwd, s.cwd);
         assert_eq!(got.env, s.env);
         assert_eq!(got.env_file, s.env_file);
-        assert!(!got.autostart);
         assert_eq!(got.restart, Restart::OnFailure);
     }
 

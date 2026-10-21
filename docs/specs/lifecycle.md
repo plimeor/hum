@@ -14,10 +14,10 @@ Each service MUST be registered as a LaunchAgent of the current user, with label
 A service with `restart = "always"` MUST be started again by launchd every time it exits; `"on-failure"` MUST be started again only after a non-zero exit; `"never"` MUST NOT be started again. launchd decides the interval between starts.
 
 ### Requirement: Start at login
-A service with `autostart = true` that has not been stopped MUST start when the user logs in; a service with `autostart = false` MUST NOT start at login.
+Whether a service starts when the user logs in MUST follow the last `hum start` or `hum stop`: a service that was started and not stopped since MUST start at login, and a stopped service MUST NOT.
 
 ### Requirement: start
-`hum start` MUST clear the disabled state left by `stop`, regenerate the plist from the current config, and start the service, including a service with `autostart = false`; when the service is already running it MUST do nothing.
+`hum start` MUST clear the disabled state left by `stop`, regenerate the plist from the current config, and start the service; when the service is already running it MUST do nothing.
 
 ### Requirement: stop
 `hum stop` MUST stop the service and keep it from starting at later logins, until `hum start` or `hum restart` runs.

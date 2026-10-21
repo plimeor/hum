@@ -90,9 +90,9 @@ mod tests {
         );
     }
 
-    // Requirement: Restart policy, Start at login, Config directory location
+    // Requirement: Restart policy, Config directory location
     #[test]
-    fn on_failure_without_autostart() {
+    fn on_failure_with_hum_home() {
         golden(
             "on-failure.plist",
             &Job {
@@ -102,6 +102,7 @@ mod tests {
                     "HUM_HOME".into(),
                     "/Users/me/dot & files/hum".into(),
                 )]),
+                run_at_load: true,
                 keep_alive: Some(KeepAlive::OnFailure {
                     successful_exit: false,
                 }),

@@ -101,7 +101,8 @@ impl App {
             label: label(&s.name),
             program_arguments: vec![hum_path.into(), "run".into(), s.name.to_string()],
             environment_variables: self.job_env(),
-            run_at_load: s.autostart,
+            // Login brings a service back unless `hum stop` disabled it.
+            run_at_load: true,
             keep_alive: match s.restart {
                 Restart::Always => Some(plist::KeepAlive::Always(true)),
                 Restart::OnFailure => Some(plist::KeepAlive::OnFailure {
@@ -178,7 +179,8 @@ impl App {
         if !st.loaded {
             self.ld.bootstrap(&self.paths.plist_file(name))?;
         }
-        // bootstrap only runs the job when RunAtLoad is set.
+        // A job that is loaded but exited (e.g. crashed) is not restarted
+        // by bootstrap; kickstart runs it, and leaves a running job alone.
         self.ld.kickstart(&label)?;
         self.ensure_rotate_job()?;
         Ok(StartOutcome::Started)
@@ -246,7 +248,7 @@ impl App {
         }
         let data = self.render_plist(&s);
         if st.loaded {
-            // Only `autostart` and `restart` live in the plist; everything
+            // Only `restart` lives in the plist; everything
             // else is read by `hum run` at the next start.
             if fs::read(&plist).is_ok_and(|cur| cur == data) {
                 return Ok(ChangeOutcome::Applied);
@@ -514,7 +516,6 @@ pub struct Report {
     pub command_display: String,
     pub cwd: PathBuf,
     pub env_file: Vec<PathBuf>,
-    pub autostart: bool,
     pub restart: Restart,
     pub log_max_size: u64,
     pub log_keep: u64,
@@ -546,7 +547,6 @@ impl App {
             command_display: s.command_string(),
             cwd: s.resolved_cwd(&self.paths.home),
             env_file: s.resolved_env_files(&self.paths.home),
-            autostart: s.autostart,
             restart: s.restart,
             log_max_size,
             log_keep,
@@ -1072,30 +1072,16 @@ mod tests {
 
     // Requirement: start
     #[test]
-    fn start_runs_services_without_autostart() {
-        let f = fixture();
-        f.write("x", "command = [\"sleep\", \"1\"]\nautostart = false\n");
-        f.app.start(&n("x")).unwrap();
-        assert!(f.status("x").running);
-    }
-
-    // Requirement: start
-    #[test]
     fn start_reloads_an_outdated_loaded_job() {
         let f = fixture();
-        f.write("x", "command = [\"sleep\", \"1\"]\nautostart = false\n");
+        f.write("x", r#"command = ["sleep", "1"]"#);
         f.app.start(&n("x")).unwrap();
         f.ld.jobs.borrow_mut().get_mut("hum.x").unwrap().running = false;
-        f.write(
-            "x",
-            "command = [\"sleep\", \"1\"]\nautostart = false\nrestart = \"never\"\n",
-        );
+        f.write("x", "command = [\"sleep\", \"1\"]\nrestart = \"never\"\n");
         f.take_calls();
         f.app.start(&n("x")).unwrap();
-        assert_eq!(
-            f.take_calls(),
-            ["bootout hum.x", "bootstrap hum.x", "kickstart hum.x"]
-        );
+        assert_eq!(f.take_calls()[..2], ["bootout hum.x", "bootstrap hum.x"]);
+        assert!(f.status("x").running);
         assert!(f.loaded_def_current("x"));
     }
 
@@ -1128,7 +1114,7 @@ mod tests {
         f.write("x", r#"command = ["sleep", "1"]"#);
         f.app.start(&n("x")).unwrap();
         f.app.stop(&n("x")).unwrap();
-        f.write("x", "command = [\"sleep\", \"1\"]\nautostart = false\n");
+        f.write("x", "command = [\"sleep\", \"1\"]\nrestart = \"never\"\n");
         let outcome = f.app.apply_config_change(&n("x"), true).unwrap();
         assert!(matches!(outcome, ChangeOutcome::Applied));
         assert!(!f.status("x").loaded);
@@ -1144,7 +1130,10 @@ mod tests {
         let f = fixture();
         f.write("x", r#"command = ["sleep", "1"]"#);
         f.app.start(&n("x")).unwrap();
-        f.write("x", "command = [\"sleep\", \"1\"]\nautostart = false\n");
+        f.write(
+            "x",
+            "command = [\"sleep\", \"1\"]\nrestart = \"on-failure\"\n",
+        );
         f.take_calls();
         let outcome = f.app.apply_config_change(&n("x"), false).unwrap();
         assert!(matches!(outcome, ChangeOutcome::NeedsRestart { .. }));
@@ -1272,10 +1261,7 @@ mod tests {
             "running service keeps running after reload"
         );
         assert!(f.loaded_def_current("changed"));
-        assert!(
-            f.status("new1").running,
-            "registered and started (autostart)"
-        );
+        assert!(f.status("new1").running, "registered and started");
         assert!(!f.status("orphan").loaded);
         assert!(!a.paths.plist_file("orphan").exists());
         assert!(a.plan().unwrap().0.is_empty());

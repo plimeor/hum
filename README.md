@@ -30,7 +30,6 @@ On its first run hum creates the global config and records the current shell's `
 command = ["t3", "server"]   # argv; a string runs through /bin/sh -c
 cwd = "~/work/t3"
 env_file = [".env"]          # relative to cwd; later files override earlier ones
-autostart = true             # start at login
 restart = "always"           # always | on-failure | never
 
 [env]
@@ -46,7 +45,6 @@ keep = 3
 | `command` | required | An array runs as argv; a string runs through `/bin/sh -c` |
 | `cwd` | your home directory | `~` and `$HOME` are expanded |
 | `env_file` | `[]` | `hum run` refuses to start when any of them is missing |
-| `autostart` | `true` | Whether to start at login |
 | `restart` | `always` | `on-failure` restarts only after a non-zero exit |
 | `[env]` | `{}` | Values are taken literally, with no expansion |
 | `[log]` | global | `max_size` uses powers of 1024; `keep` is how many old copies to keep |
@@ -68,13 +66,13 @@ Unknown fields and illegal values are errors, and an invalid file is never partl
 
 | Command | What it does |
 |---|---|
-| `hum new <name> [flags] -- <cmd> [args...]` | Create a service and start it. Flags: `--cwd`, `--env K=V`, `--env-file PATH`, `--restart`, `--no-autostart`, `--no-start` |
+| `hum new <name> [flags] -- <cmd> [args...]` | Create a service and start it. Flags: `--cwd`, `--env K=V`, `--env-file PATH`, `--restart`, `--no-start` |
 | `hum edit <name>` / `hum edit --global` | Edit in `$VISUAL` / `$EDITOR` (`vi` when neither is set); saved only when valid |
 | `hum set <name> <key>=<value>...` | Change fields, keeping comments in the file, e.g. `hum set t3 env.PORT=4000 restart=on-failure` |
 | `hum set <name> command -- <cmd> [args...]` | Change `command` |
 | `hum unset <name> <key>...` | Remove fields |
 | `hum rm <name>...` | Stop the service and delete its plist and config; `--keep-config` only unregisters |
-| `hum start <name>...` | Start, clearing a previous `stop` |
+| `hum start <name>...` | Start; the service also starts at every login until `hum stop` |
 | `hum stop <name>...` | Stop, and stay stopped across logins until `start` |
 | `hum restart <name>...` | Regenerate the plist from the current config and restart |
 | `hum ls` | List services and their state (running / stopped / crashed / disabled) |
