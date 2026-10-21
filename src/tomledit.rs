@@ -13,9 +13,11 @@ impl Doc {
 
     /// Sets the key at `path`. An existing value keeps its surrounding
     /// whitespace and trailing comment; a missing table is created as a
-    /// standard `[table]`.
+    /// standard `[table]` at the end of the file, after any comments that
+    /// end it, so those stay with the content they followed.
     pub fn set(&mut self, path: &[&str], mut value: Value) -> Result<()> {
         let (leaf, parents) = path.split_last().expect("empty key path");
+        let new_table = parents.first().filter(|k| self.0.get(k).is_none());
         let table = descend(self.0.as_table_mut(), parents, true)?.expect("created");
         match table.get_mut(leaf) {
             Some(Item::Value(old)) => {
@@ -27,7 +29,24 @@ impl Doc {
                 table.insert(leaf, Item::Value(value));
             }
         }
+        if let Some(key) = new_table {
+            self.keep_trailer_before(key);
+        }
         Ok(())
+    }
+
+    /// toml_edit prints the text after the last item of the file (its
+    /// trailing comments) at the very end, below a newly appended table;
+    /// moving it into the new table's prefix keeps it where it was.
+    fn keep_trailer_before(&mut self, key: &str) {
+        let trailer = self.0.trailing().as_str().unwrap_or("").to_string();
+        if trailer.trim().is_empty() {
+            return;
+        }
+        if let Some(t) = self.0.get_mut(key).and_then(Item::as_table_mut) {
+            t.decor_mut().set_prefix(format!("{trailer}\n"));
+            self.0.set_trailing("");
+        }
     }
 
     /// Removes the key at `path`; reports whether it existed.
@@ -131,6 +150,24 @@ DEBUG = "1"
             SAMPLE
                 .replace("DEBUG = \"1\"\n", "")
                 .replace("autostart = true             # login\n", "")
+        );
+    }
+
+    // Requirement: Edits keep comments
+    #[test]
+    fn a_new_table_goes_after_the_comments_that_end_the_file() {
+        let mut d = Doc::parse("command = [\"t3\"]\n# about command\n").unwrap();
+        d.set(&["env", "A"], "1".into()).unwrap();
+        assert_eq!(
+            d.to_string(),
+            "command = [\"t3\"]\n# about command\n\n[env]\nA = \"1\"\n"
+        );
+
+        let mut d = Doc::parse(&format!("{SAMPLE}# end of env\n")).unwrap();
+        d.set(&["log", "keep"], 5.into()).unwrap();
+        assert_eq!(
+            d.to_string(),
+            format!("{SAMPLE}# end of env\n\n[log]\nkeep = 5\n")
         );
     }
 

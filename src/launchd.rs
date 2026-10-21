@@ -320,7 +320,7 @@ mod macos {
         }
     }
 
-    /// A throwaway job; unloaded and re-enabled on drop.
+    /// A throwaway job; unloaded, and re-enabled if disabled, on drop.
     struct Job {
         label: String,
         plist: PathBuf,
@@ -331,7 +331,11 @@ mod macos {
         fn drop(&mut self) {
             let ld = manager();
             let _ = ld.bootout(&self.label);
-            let _ = ld.enable(&self.label);
+            // Every enable or disable leaves a record in launchd that only
+            // root can delete; only a disabled job needs re-enabling.
+            if ld.disabled().is_ok_and(|d| d.contains(&self.label)) {
+                let _ = ld.enable(&self.label);
+            }
         }
     }
 
@@ -342,6 +346,10 @@ mod macos {
             std::process::id(),
             N.fetch_add(1, Ordering::Relaxed)
         );
+        job_labelled(label, program, run_at_load)
+    }
+
+    fn job_labelled(label: String, program: &[&str], run_at_load: bool) -> Job {
         let dir = tempfile::tempdir().unwrap();
         // launchd reports the real path; macOS temp dirs sit under /var.
         let plist = std::fs::canonicalize(dir.path())
@@ -419,7 +427,13 @@ mod macos {
     #[ignore = "needs macOS launchd"]
     fn disabled_jobs_are_listed_and_refuse_bootstrap() {
         let ld = manager();
-        let j = job(&["/bin/sleep", "300"], true);
+        // A fixed label: disabling leaves a record launchd keeps for good,
+        // and reusing the label keeps that to one record.
+        let j = job_labelled(
+            "local.hum-test.disabled".into(),
+            &["/bin/sleep", "300"],
+            true,
+        );
         ld.disable(&j.label).unwrap();
         assert!(ld.disabled().unwrap().contains(&j.label));
         assert!(

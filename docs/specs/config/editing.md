@@ -23,7 +23,7 @@ When the first argument of `command` is not found in the global `PATH`, `hum new
 `hum set <name> <key>=<value>...` and `hum unset <name> <key>...` MUST accept only `command`, `cwd`, `env_file`, `restart`, `env.<NAME>`, `log.max_size`, and `log.keep`. An `env_file` value separates several paths with commas. `command` MUST be set through `hum set <name> command -- <cmd> [args...]` and cannot be unset.
 
 ### Requirement: Edits keep comments
-`hum set` and `hum unset` MUST change only the content of the target key; every other piece of text in the file, comments included, MUST stay unchanged.
+`hum set` and `hum unset` MUST change only the content of the target key; every other piece of text in the file, comments included, MUST stay unchanged. A table that `hum set` creates MUST go after the comments that end the file, so they stay below the content they followed.
 
 ### Requirement: Edits follow symbolic links
 When the service config or global config that `edit`, `set`, or `unset` changes is a symbolic link, hum MUST write the change to the file the link resolves to and leave the link in place. When the link resolves to no file, the command MUST fail without writing anything.

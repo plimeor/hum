@@ -29,7 +29,10 @@ When `hum new`, `start`, or `restart`, or the automatic restart after a config c
 `hum restart` MUST regenerate the plist from the current config and restart the service, so that changes to the config and `.env` files take effect then; a stopped service MUST be enabled again and started.
 
 ### Requirement: rm
-`hum rm` MUST stop the service, delete its plist, and then delete its config file; unless `-y` is given it MUST ask for confirmation first; with `--keep-config` it only unregisters and keeps the config file. A service created later with the same name MUST NOT inherit the removed service's stopped state.
+`hum rm` MUST stop the service, delete its plist, and then delete its config file and its log together with every rotated copy; unless `-y` is given it MUST ask for confirmation first; with `--keep-config` it only unregisters and keeps the config file and logs. When the last service is removed, the log rotation job's own log MUST be deleted with the job. A service created later with the same name MUST NOT inherit the removed service's stopped state.
+
+### Requirement: launchd records stay bounded
+launchd keeps a permanent per-user record of every job that was ever enabled or disabled, which only root can delete. hum MUST add such a record only when `hum stop` disables a service; `start`, `restart`, `rm`, `apply`, and installing the log rotation job MUST NOT add one for a job that is not disabled.
 
 ### Requirement: hum path in the plist
 When a stable path to the current binary exists on `PATH` (such as a package manager's symlink), the hum path written into the plist MUST be that path rather than a versioned path that breaks on upgrade.

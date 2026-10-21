@@ -100,6 +100,17 @@ pub fn rotate(path: &Path, keep: u64, now: DateTime<Local>) -> io::Result<bool> 
     Ok(true)
 }
 
+/// Deletes the log at `path` and every rotated copy of it.
+pub fn remove(path: &Path) -> io::Result<()> {
+    for p in rotated(path)?.into_iter().chain([path.to_path_buf()]) {
+        match fs::remove_file(p) {
+            Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 /// Rotates when the log has reached `max_size`.
 pub fn rotate_if_needed(
     path: &Path,

@@ -229,7 +229,7 @@ impl App {
             return Ok(StartOutcome::AlreadyRunning { pid: st.pid });
         }
         let st = self.install(name, &self.render_plist(&s))?;
-        self.ld.enable(&label)?;
+        self.clear_disabled(&label)?;
         if !st.loaded {
             self.ld.bootstrap(&self.paths.plist_file(name))?;
         }
@@ -254,14 +254,14 @@ impl App {
         let label = label(name);
         self.ld.bootout(&label)?;
         self.write_plist(name, &self.render_plist(&s))?;
-        self.ld.enable(&label)?;
+        self.clear_disabled(&label)?;
         self.ld.bootstrap(&self.paths.plist_file(name))?;
         self.ld.kickstart(&label)?;
         self.ensure_rotate_job()
     }
 
     /// Unloads the service, deletes its plist and, unless `keep_config`,
-    /// its config file.
+    /// its config file and logs.
     pub fn remove(&self, name: &ServiceName, keep_config: bool) -> Result<()> {
         let (cfg, plist) = (self.paths.service_file(name), self.paths.plist_file(name));
         if !cfg.exists() && !plist.exists() {
@@ -269,12 +269,13 @@ impl App {
         }
         let label = label(name);
         self.ld.bootout(&label)?;
-        // Drop the disabled override so a future service with this name
-        // does not inherit it.
-        self.ld.enable(&label)?;
+        // A future service with this name must not inherit `hum stop`.
+        self.clear_disabled(&label)?;
         remove_if_exists(&plist)?;
         if !keep_config {
             remove_if_exists(&cfg)?;
+            let log = self.paths.log_file(name);
+            logfile::remove(&log).with_context(|| format!("deleting {}", log.display()))?;
         }
         self.prune_rotate_job()
     }
@@ -323,8 +324,18 @@ impl App {
     pub fn ensure_rotate_job(&self) -> Result<()> {
         let st = self.install(ROTATE_NAME, &self.render_rotate_plist())?;
         if !st.loaded {
-            self.ld.enable(&label(ROTATE_NAME))?;
+            self.clear_disabled(&label(ROTATE_NAME))?;
             self.ld.bootstrap(&self.paths.plist_file(ROTATE_NAME))?;
+        }
+        Ok(())
+    }
+
+    /// Clears a disable left by `hum stop`. launchd keeps every enable or
+    /// disable as a record that only root can delete, so a job that is
+    /// not disabled is left alone rather than given an "enabled" record.
+    fn clear_disabled(&self, label: &str) -> Result<()> {
+        if self.ld.disabled()?.contains(label) {
+            self.ld.enable(label)?;
         }
         Ok(())
     }
@@ -339,7 +350,8 @@ impl App {
 
     fn remove_rotate_job(&self) -> Result<()> {
         self.ld.bootout(&label(ROTATE_NAME))?;
-        remove_if_exists(&self.paths.plist_file(ROTATE_NAME))
+        remove_if_exists(&self.paths.plist_file(ROTATE_NAME))?;
+        remove_if_exists(&self.paths.log_file(ROTATE_NAME))
     }
 
     /// Why what runs does not match the service's config, if it does not:
@@ -803,14 +815,13 @@ impl App {
                     && !st.loaded
                     && !self.ld.disabled()?.contains(&label)
                 {
-                    self.ld.enable(&label)?;
                     self.ld.bootstrap(&self.paths.plist_file(name))?;
                 }
                 Ok(())
             }
             ActionKind::Unregister => {
                 self.ld.bootout(&label)?;
-                self.ld.enable(&label)?;
+                self.clear_disabled(&label)?;
                 remove_if_exists(&self.paths.plist_file(name))
             }
         }
@@ -1137,10 +1148,12 @@ mod tests {
             Ok(())
         }
         fn enable(&self, label: &str) -> Result<()> {
+            self.log(format!("enable {label}"));
             self.disabled.borrow_mut().remove(label);
             Ok(())
         }
         fn disable(&self, label: &str) -> Result<()> {
+            self.log(format!("disable {label}"));
             self.disabled.borrow_mut().insert(label.into());
             Ok(())
         }
@@ -1239,6 +1252,58 @@ mod tests {
             assert!(!p.exists(), "{} still exists", p.display());
         }
         assert!(!f.status("t3").loaded && !f.status(ROTATE_NAME).loaded);
+    }
+
+    // Requirement: rm
+    #[test]
+    fn rm_deletes_logs_unless_the_config_is_kept() {
+        let f = fixture();
+        let a = &f.app;
+        let logs = &a.paths.log_dir;
+        f.write("t3", r#"command = ["sleep", "1"]"#);
+        f.write("t3_", r#"command = ["sleep", "1"]"#);
+        f.write("kept", r#"command = ["sleep", "1"]"#);
+        for name in ["t3", "t3_", "kept"] {
+            a.start(&n(name)).unwrap();
+        }
+        let files = [
+            "t3.log",
+            "t3__2026-10-21_10-00-00.log",
+            "t3__2026-10-21_10-00-00_1.log",
+            "t3_.log",
+            "t3___2026-10-21_10-00-00.log",
+            "kept.log",
+            "kept__2026-10-21_10-00-00.log",
+        ];
+        for file in files {
+            fs::write(logs.join(file), "x\n").unwrap();
+        }
+        fs::write(logs.join("_rotate.log"), "").unwrap();
+        a.remove(&n("t3"), false).unwrap();
+        a.remove(&n("kept"), true).unwrap();
+        let mut left: Vec<_> = fs::read_dir(logs)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect();
+        left.sort();
+        assert_eq!(
+            left,
+            [
+                "_rotate.log",
+                "kept.log",
+                "kept__2026-10-21_10-00-00.log",
+                "t3_.log",
+                "t3___2026-10-21_10-00-00.log",
+            ]
+        );
+        a.remove(&n("t3_"), false).unwrap();
+        assert!(logs.join("_rotate.log").exists(), "kept's config remains");
+        a.remove(&n("kept"), false).unwrap();
+        assert!(
+            !logs.join("_rotate.log").exists(),
+            "goes with the rotate job"
+        );
+        assert!(!logs.join("kept__2026-10-21_10-00-00.log").exists());
     }
 
     // Requirement: start
@@ -1465,6 +1530,30 @@ mod tests {
         assert!(!f.status("orphan").loaded);
         assert!(!a.paths.plist_file("orphan").exists());
         assert!(a.plan().unwrap().0.is_empty());
+    }
+
+    // Requirement: launchd records stay bounded, rm
+    #[test]
+    fn only_a_disabled_job_is_enabled() {
+        let f = fixture();
+        let a = &f.app;
+        let enables = || -> Vec<String> {
+            f.take_calls()
+                .into_iter()
+                .filter(|c| c.starts_with("enable"))
+                .collect()
+        };
+        f.write("x", r#"command = ["sleep", "1"]"#);
+        a.start(&n("x")).unwrap();
+        a.restart(&n("x")).unwrap();
+        assert!(enables().is_empty(), "never stopped, never enabled");
+        a.stop(&n("x")).unwrap();
+        a.start(&n("x")).unwrap();
+        assert_eq!(enables(), ["enable hum.x"]);
+        a.stop(&n("x")).unwrap();
+        a.remove(&n("x"), false).unwrap();
+        assert_eq!(enables(), ["enable hum.x"], "rm clears the stop");
+        assert!(!f.ld.disabled.borrow().contains("hum.x"));
     }
 
     // Requirement: apply aligns launchd, apply dry run
