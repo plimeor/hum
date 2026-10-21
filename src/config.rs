@@ -20,9 +20,16 @@ pub const DEFAULT_LOG_KEEP: u64 = 3;
 
 /// A service name matching `[a-z0-9][a-z0-9_-]*`, so it is safe in file
 /// names and launchd labels. Checked once, where a name enters hum.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(transparent)]
 pub struct ServiceName(String);
+
+/// Quoted like a string, so `{name:?}` in a message reads `"t3"`.
+impl std::fmt::Debug for ServiceName {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Debug::fmt(&self.0, f)
+    }
+}
 
 impl ServiceName {
     pub fn parse(name: &str) -> Result<Self> {
@@ -647,6 +654,15 @@ mod tests {
         for bad in ["", "_rotate", "-x", "A", "a.b", "a/b", "a b"] {
             assert!(ServiceName::parse(bad).is_err(), "{bad:?}");
         }
+    }
+
+    #[test]
+    fn service_names_read_as_quoted_strings_in_messages() {
+        let name = ServiceName::parse("t3").unwrap();
+        assert_eq!(
+            format!("service {name:?} not found"),
+            "service \"t3\" not found"
+        );
     }
 
     #[test]

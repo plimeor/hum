@@ -91,7 +91,11 @@ fn new_warns_and_never_overwrites() {
     let before = fs::read_to_string(h.service_file("demo")).unwrap();
     let o = h.run(&["new", "demo", "--no-start", "--", "true"]);
     assert!(!o.status.success());
-    assert!(stderr(&o).contains("already exists"));
+    assert!(
+        stderr(&o).contains("service \"demo\" already exists"),
+        "{}",
+        stderr(&o)
+    );
     assert_eq!(fs::read_to_string(h.service_file("demo")).unwrap(), before);
 }
 
@@ -256,6 +260,86 @@ fn logs_view_and_rotate() {
     assert_eq!(copies.len(), 1, "{copies:?}");
     let again = stdout(&h.run(&["logs", "a", "--rotate"]));
     assert!(again.contains("nothing to rotate"), "{again}");
+}
+
+fn json(o: &Output) -> serde_json::Value {
+    serde_json::from_slice(&o.stdout)
+        .unwrap_or_else(|e| panic!("stdout is not one JSON document ({e}): {}", stdout(o)))
+}
+
+// Requirement: JSON for every command, JSON results per service, JSON for the other commands
+#[test]
+fn json_output() {
+    let h = Home::new();
+    let o = h.run(&[
+        "--json",
+        "new",
+        "demo",
+        "--no-start",
+        "--env-file",
+        "missing.env",
+        "--",
+        "definitely-not-a-command",
+    ]);
+    assert!(o.status.success(), "{}", stderr(&o));
+    let v = json(&o);
+    assert_eq!(v["name"], "demo");
+    assert_eq!(v["outcome"], "created");
+    assert_eq!(v["config"], h.service_file("demo").display().to_string());
+    assert_eq!(v["warnings"].as_array().unwrap().len(), 2, "{v}");
+    assert!(stderr(&o).contains("missing.env does not exist"));
+
+    // A failure before any result is an error object, with the same status.
+    let o = h.run(&["--json", "new", "demo", "--no-start", "--", "true"]);
+    assert_eq!(o.status.code(), Some(1));
+    assert!(
+        json(&o)["error"]
+            .as_str()
+            .unwrap()
+            .contains("already exists")
+    );
+    let before = fs::read_to_string(h.service_file("demo")).unwrap();
+    let o = h.run(&["--json", "set", "demo", "restart=sometimes"]);
+    assert_eq!(o.status.code(), Some(1));
+    assert!(
+        json(&o)["error"]
+            .as_str()
+            .unwrap()
+            .contains("left unchanged")
+    );
+    assert_eq!(fs::read_to_string(h.service_file("demo")).unwrap(), before);
+
+    fs::create_dir_all(h.log_dir()).unwrap();
+    fs::write(h.log_dir().join("demo.log"), "1\n2\n3\n").unwrap();
+    let v = json(&h.run(&["--json", "logs", "demo", "-n", "2"]));
+    assert_eq!(
+        v,
+        serde_json::json!([{ "name": "demo", "lines": ["2", "3"] }])
+    );
+    let o = h.run(&["--json", "logs", "--all", "--rotate"]);
+    assert!(o.status.success(), "{}", stderr(&o));
+    let v = json(&o);
+    assert_eq!(v[0]["name"], "demo");
+    assert_eq!(v[0]["outcome"], "rotated");
+    let v = json(&h.run(&["--json", "logs", "demo", "--rotate"]));
+    assert_eq!(v[0]["outcome"], "not_rotated");
+
+    for args in [
+        &["--json", "edit", "demo"][..],
+        &["--json", "logs", "demo", "-f"],
+        &["--json", "run", "demo"],
+        &["--json", "completion", "fish"],
+    ] {
+        let o = h.run(args);
+        assert_eq!(o.status.code(), Some(1), "{args:?}");
+        assert!(
+            json(&o)["error"]
+                .as_str()
+                .unwrap()
+                .contains("not supported"),
+            "{args:?}"
+        );
+    }
 }
 
 // Requirement: Replace itself with the service, Environment built from scratch

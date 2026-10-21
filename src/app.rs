@@ -830,14 +830,15 @@ impl App {
 
 // --- doctor ---
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Serialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
 pub enum Severity {
     Ok,
     Warn,
     Error,
 }
 
-#[derive(Debug)]
+#[derive(Serialize, Debug)]
 pub struct Finding {
     pub severity: Severity,
     pub subject: String,

@@ -83,7 +83,7 @@ Unknown fields and illegal values are errors, and an invalid file is never partl
 | `hum run <name>` | Run a service in the foreground; this is also what launchd runs |
 | `hum completion fish\|zsh\|bash` | Print a completion script |
 
-Commands that take `<name>...` accept several names, or `--all` for every service. The global `--json` flag makes `ls` and `show` print JSON, and `-y` skips confirmations.
+Commands that take `<name>...` accept several names, or `--all` for every service. The global `--json` flag prints every command's result as one JSON document on standard output, for scripts calling hum (all commands but `edit`, `run`, `completion` and `logs -f`); `-y` skips confirmations.
 
 After `edit`, `set`, or `unset` changes a service config, a running service restarts automatically; `--no-restart` turns that off. Changing the global config restarts nothing; run `hum restart --all` to apply it right away.
 
