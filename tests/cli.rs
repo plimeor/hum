@@ -297,6 +297,28 @@ fn run_refuses_to_start_without_its_env_file() {
     );
 }
 
+// Requirement: Refuse to start without its cwd, Exit status on failure
+#[test]
+fn run_names_a_missing_cwd() {
+    let h = Home::new();
+    h.write_service("demo", "command = [\"true\"]\ncwd = \"~/gone\"\n");
+    let o = h.run(&["run", "demo"]);
+    assert_eq!(o.status.code(), Some(1));
+    let err = stderr(&o);
+    assert!(
+        err.contains("demo: not starting: cwd") && err.contains("gone does not exist"),
+        "{err}"
+    );
+}
+
+// Requirement: Version
+#[test]
+fn version() {
+    let o = Home::new().run(&["--version"]);
+    assert!(o.status.success());
+    assert_eq!(stdout(&o), format!("hum {}\n", env!("CARGO_PKG_VERSION")));
+}
+
 // Requirement: Completion scripts
 #[test]
 fn completion_scripts() {

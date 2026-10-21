@@ -8,7 +8,7 @@ Type: feature
 ## Requirements
 
 ### Requirement: apply aligns launchd
-`hum apply` MUST take the `services/` directory as the source of truth: generate and register a plist for each new config file; unregister and delete every hum plist that has no config file; regenerate and reload each outdated plist, with a service that was running before the reload still running after it.
+`hum apply` MUST take the `services/` directory as the source of truth: generate and register a plist for each new config file, leaving a service that `hum stop` stopped not running; unregister and delete every hum plist that has no config file; regenerate and reload each outdated plist, with a service that was running before the reload still running after it.
 
 ### Requirement: apply skips invalid configs
 `hum apply` MUST skip invalid config files, report each one, carry on with the remaining services, and finally exit with a non-zero status.

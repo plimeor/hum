@@ -59,8 +59,16 @@ fn remove_if_exists(path: &Path) -> Result<()> {
 /// path, since pointing a link elsewhere changes the content without
 /// touching the new file. None when the file does not exist.
 fn last_change(path: &Path) -> Option<std::time::SystemTime> {
+    let modified = fs::metadata(path).and_then(|m| m.modified()).ok()?;
+    Some(link_change(path).map_or(modified, |t| t.max(modified)))
+}
+
+/// The latest modification time of the symbolic links met while resolving
+/// path: when path last started resolving to where it does now. None when
+/// path meets no link or does not resolve.
+fn link_change(path: &Path) -> Option<std::time::SystemTime> {
     use std::path::Component;
-    let mut latest = fs::metadata(path).and_then(|m| m.modified()).ok()?;
+    let mut latest: Option<std::time::SystemTime> = None;
     let mut base = PathBuf::new();
     let mut rest: Vec<std::ffi::OsString> = path
         .components()
@@ -78,13 +86,11 @@ fn last_change(path: &Path) -> Option<std::time::SystemTime> {
             _ => {
                 let next = base.join(&part);
                 match fs::symlink_metadata(&next) {
-                    // metadata() above already rejected link loops; the
-                    // bound only keeps this loop finite if links change
-                    // underneath it.
+                    // Bounds the walk on a link loop.
                     Ok(m) if m.file_type().is_symlink() && links < 40 => {
                         links += 1;
                         if let Ok(t) = m.modified() {
-                            latest = latest.max(t);
+                            latest = latest.max(Some(t));
                         }
                         let target = fs::read_link(&next).ok()?;
                         rest.extend(target.components().rev().map(|c| c.as_os_str().to_owned()));
@@ -94,7 +100,18 @@ fn last_change(path: &Path) -> Option<std::time::SystemTime> {
             }
         }
     }
-    Some(latest)
+    latest
+}
+
+/// What brings an out-of-sync service in line with its config. A stopped
+/// (disabled) service only needs its plist rewritten, which `apply` does
+/// without starting it; `restart` would start it.
+pub fn sync_fix(name: &str, disabled: bool) -> String {
+    if disabled {
+        "run `hum apply` to update it; it stays stopped".into()
+    } else {
+        format!("run `hum restart {name}` to apply")
+    }
 }
 
 pub enum StartOutcome {
@@ -326,17 +343,27 @@ impl App {
     }
 
     /// The config files a running service read when it started that have
-    /// changed since. `hum run` reads them all at start, so any later
-    /// change waits for a restart.
+    /// changed since, and its cwd if a link on that path now points
+    /// elsewhere. `hum run` reads them all at start, so any later change
+    /// waits for a restart.
     fn stale_reason(&self, s: &Service, st: &Status) -> Option<String> {
         let started = st.started_at.filter(|_| st.running)?;
         let mut files = vec![self.paths.service_file(&s.name), self.paths.global_file()];
         files.extend(s.resolved_env_files(&self.paths.home));
-        let changed: Vec<String> = files
+        let mut changed: Vec<String> = files
             .iter()
             .filter(|f| last_change(f).is_some_and(|t| t > started))
             .map(|f| config::contract_path(f, &self.paths.home))
             .collect();
+        // Files inside cwd change all the time; only a link on its path
+        // moving elsewhere changes where the service runs.
+        let cwd = s.resolved_cwd(&self.paths.home);
+        if link_change(&cwd).is_some_and(|t| t > started) {
+            changed.push(format!(
+                "cwd {}",
+                config::contract_path(&cwd, &self.paths.home)
+            ));
+        }
         (!changed.is_empty()).then(|| format!("started before {} changed", changed.join(", ")))
     }
 
@@ -683,7 +710,12 @@ impl App {
             ActionKind::Register | ActionKind::Update => {
                 let s = config::load_service(&self.paths, &act.name)?;
                 let st = self.install(&act.name, &self.render_plist(&s))?;
-                if act.kind == ActionKind::Register && !st.loaded {
+                // A service `hum stop` disabled keeps only its plist, so
+                // it stays stopped until `hum start`.
+                if act.kind == ActionKind::Register
+                    && !st.loaded
+                    && !self.ld.disabled()?.contains(&label)
+                {
                     self.ld.enable(&label)?;
                     self.ld.bootstrap(&self.paths.plist_file(&act.name))?;
                 }
@@ -754,6 +786,7 @@ fn check_program(plist_path: &Path) -> Option<(Severity, String)> {
 
 impl App {
     pub fn doctor(&self) -> Result<Vec<Finding>> {
+        let disabled = self.ld.disabled()?;
         let mut out = vec![];
         let mut add = |subject: &str, (severity, message): (Severity, String)| {
             out.push(Finding {
@@ -830,9 +863,10 @@ impl App {
                 }
             }
             if let Some(reason) = self.sync_reason(&s, &self.ld.status(&label(&name))?) {
+                let fix = sync_fix(&name, disabled.contains(&label(&name)));
                 problems.push((
                     Severity::Warn,
-                    format!("out of sync with its config ({reason}); run `hum restart {name}`"),
+                    format!("out of sync with its config ({reason}); {fix}"),
                 ));
             }
             problems.extend(check_program(&self.paths.plist_file(&name)));
@@ -903,31 +937,61 @@ impl App {
     pub fn prepare_run(&self, name: &ServiceName, base: &BTreeMap<String, String>) -> Result<Exec> {
         let s = config::load_service(&self.paths, name)?;
         let global = config::load_global(&self.paths)?;
-        let mut warnings = vec![];
         let (max_size, keep) = config::effective_log(&global, Some(&s));
         let now = chrono::Local::now();
-        if let Err(e) = logfile::rotate_if_needed(&self.paths.log_file(name), max_size, keep, now) {
-            warnings.push(format!("log rotation: {e}"));
+        let rotated = logfile::rotate_if_needed(&self.paths.log_file(name), max_size, keep, now);
+        let mut ex = self
+            .resolve_run(&s, &global, base)
+            .with_context(|| format!("{name}: not starting"))?;
+        if let Err(e) = rotated {
+            ex.warnings.insert(0, format!("log rotation: {e}"));
         }
-        let (env, err) = environ::assemble(base, &global, &s, &self.paths.home);
+        Ok(ex)
+    }
+
+    /// Why `hum run` would refuse to start the service right now, if it
+    /// would. Checks what `prepare_run` checks, without rotating the log.
+    pub fn run_blocker(&self, name: &ServiceName) -> Option<String> {
+        let s = config::load_service(&self.paths, name).ok()?;
+        let global = config::load_global(&self.paths).ok()?;
+        self.resolve_run(&s, &global, &environ::base())
+            .err()
+            .map(|e| format!("{e:#}"))
+    }
+
+    fn resolve_run(
+        &self,
+        s: &Service,
+        global: &config::Global,
+        base: &BTreeMap<String, String>,
+    ) -> Result<Exec> {
+        let dir = s.resolved_cwd(&self.paths.home);
+        if !dir.is_dir() {
+            bail!("cwd {} does not exist", dir.display());
+        }
+        let (env, err) = environ::assemble(base, global, s, &self.paths.home);
         if let Some(e) = err {
-            return Err(anyhow::Error::new(e).context(format!("{name}: not starting")));
+            return Err(e.into());
         }
-        for u in &env.undefined {
-            warnings.push(format!(
-                "{}:{}: ${{{}}} is undefined, expanded to \"\"",
-                u.file, u.line, u.name
-            ));
-        }
+        let warnings = env
+            .undefined
+            .iter()
+            .map(|u| {
+                format!(
+                    "{}:{}: ${{{}}} is undefined, expanded to \"\"",
+                    u.file, u.line, u.name
+                )
+            })
+            .collect();
         let argv = s.argv();
         let path = env.vars.get("PATH").map(String::as_str).unwrap_or("");
         let program = environ::look_path(&argv[0], path)
-            .with_context(|| format!("{name}: {} not found in PATH", argv[0]))?;
+            .with_context(|| format!("{} not found in PATH", argv[0]))?;
         Ok(Exec {
             program,
             argv,
             env: env.vars,
-            dir: s.resolved_cwd(&self.paths.home),
+            dir,
             warnings,
         })
     }
@@ -1396,6 +1460,77 @@ mod tests {
         fs::remove_file(cwd.join(".env")).unwrap();
         let err = f.app.prepare_run(&n("t3"), &base).err().unwrap();
         assert!(err.downcast_ref::<EnvFileError>().is_some(), "{err:#}");
+    }
+
+    // Requirement: Refuse to start without its cwd, Report a service that cannot start
+    #[test]
+    fn run_blockers_are_found_before_start() {
+        let f = fixture();
+        f.write("x", "command = [\"sleep\", \"1\"]\ncwd = \"~/nope\"\n");
+        let err = f.app.prepare_run(&n("x"), &BTreeMap::new()).err().unwrap();
+        assert!(format!("{err:#}").contains("not starting: cwd"), "{err:#}");
+        let why = f.app.run_blocker(&n("x")).unwrap();
+        assert!(
+            why.starts_with("cwd ") && why.ends_with("nope does not exist"),
+            "{why}"
+        );
+        f.write("x", "command = [\"sleep\", \"1\"]\nenv_file = [\".env\"]\n");
+        assert!(f.app.run_blocker(&n("x")).unwrap().contains(".env"));
+        f.write("x", "command = [\"no-such-command\"]\n");
+        assert!(
+            f.app
+                .run_blocker(&n("x"))
+                .unwrap()
+                .contains("not found in PATH")
+        );
+        f.write("x", "command = [\"sleep\", \"1\"]\n");
+        assert_eq!(f.app.run_blocker(&n("x")), None);
+    }
+
+    // Requirement: apply aligns launchd, Suggested fixes keep stopped services stopped
+    #[test]
+    fn a_stopped_service_stays_stopped_through_doctor_and_apply() {
+        let f = fixture();
+        f.write("x", r#"command = ["sleep", "1"]"#);
+        f.app.start(&n("x")).unwrap();
+        f.app.stop(&n("x")).unwrap();
+        fs::remove_file(f.app.paths.plist_file("x")).unwrap();
+        let findings = f.app.doctor().unwrap();
+        let x = findings.iter().find(|d| d.subject == "x").unwrap();
+        assert!(
+            x.message
+                .contains("run `hum apply` to update it; it stays stopped"),
+            "{}",
+            x.message
+        );
+        let (actions, _) = f.app.plan().unwrap();
+        assert_eq!(actions[0].kind, ActionKind::Register);
+        f.app.apply_action(&actions[0]).unwrap();
+        assert!(f.app.paths.plist_file("x").exists());
+        assert!(!f.status("x").loaded);
+        assert!(f.ld.disabled.borrow().contains("hum.x"));
+    }
+
+    // Requirement: Flag mismatches with launchd
+    #[test]
+    fn pointing_the_cwd_link_elsewhere_is_flagged() {
+        let f = fixture();
+        let home = &f.app.paths.home;
+        fs::create_dir_all(home.join("a")).unwrap();
+        fs::create_dir_all(home.join("b")).unwrap();
+        std::os::unix::fs::symlink("a", home.join("current")).unwrap();
+        f.write("x", "command = [\"sleep\", \"1\"]\ncwd = \"~/current\"\n");
+        f.app.start(&n("x")).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        fs::write(home.join("a/data"), "x").unwrap();
+        assert!(!f.row("x").out_of_sync(), "files in cwd are not config");
+        fs::remove_file(home.join("current")).unwrap();
+        std::os::unix::fs::symlink("b", home.join("current")).unwrap();
+        let reason = match f.row("x").config {
+            ConfigState::Ok { out_of_sync, .. } => out_of_sync.unwrap(),
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(reason, "started before cwd ~/current changed");
     }
 
     // Requirement: Check the log size before starting

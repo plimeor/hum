@@ -19,6 +19,9 @@ Whether a service starts when the user logs in MUST follow the last `hum start` 
 ### Requirement: start
 `hum start` MUST clear the disabled state left by `stop`, regenerate the plist from the current config, and start the service; when the service is already running it MUST do nothing.
 
+### Requirement: Report a service that cannot start
+When `hum new`, `start`, or `restart`, or the automatic restart after a config change, asks launchd to run a service that `hum run` would refuse to start, hum MUST still register it and MUST say that it is not running and why, instead of reporting it started.
+
 ### Requirement: stop
 `hum stop` MUST stop the service and keep it from starting at later logins, until `hum start` or `hum restart` runs.
 

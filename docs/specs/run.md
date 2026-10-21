@@ -23,6 +23,9 @@ A launchd job hum generates MUST run `hum run <name>`, not the service command i
 ### Requirement: Command lookup uses the assembled PATH
 When the first argument of the command contains no `/`, it MUST be looked up in the `PATH` of the assembled environment; when it is not found, `hum run` MUST exit with a non-zero status without starting the service.
 
+### Requirement: Refuse to start without its cwd
+When `cwd` does not exist, `hum run` MUST exit with a non-zero status, MUST NOT start the service, and MUST name the missing `cwd` on standard error.
+
 ### Requirement: Refuse to start without an env file
 When any `env_file` is missing or unreadable, `hum run` MUST exit with a non-zero status, MUST NOT start the service, and MUST write the missing path to standard error (the service's log under launchd).
 

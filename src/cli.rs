@@ -9,7 +9,7 @@ use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand, ValueEnum};
 use clap_complete::{ArgValueCandidates, CompletionCandidate};
 
-use crate::app::{App, ChangeOutcome, ConfigState, Severity, StartOutcome};
+use crate::app::{self, App, ChangeOutcome, ConfigState, Severity, StartOutcome, State};
 use crate::config::{self, Command, EditKey, Restart, Service, ServiceName};
 use crate::{environ, logfile, tomledit};
 
@@ -41,6 +41,7 @@ fn names_arg() -> ArgValueCandidates {
 #[derive(Parser)]
 #[command(
     name = "hum",
+    version,
     about = "Run background commands as launchd services, configured by TOML files"
 )]
 pub struct Cli {
@@ -267,7 +268,7 @@ pub fn run(cli: Cli) -> Result<()> {
         }),
         Cmd::Restart(t) => ctx.each(&ctx.targets(&t)?, |n| {
             ctx.app.restart(n)?;
-            println!("{n}: restarted");
+            ctx.report_started(n, "restarted");
             Ok(())
         }),
         Cmd::Ls => ctx.ls(),
@@ -378,14 +379,29 @@ impl Ctx {
                 let pid = pid.map_or("?".into(), |p| p.to_string());
                 println!("{name}: already running (pid {pid})");
             }
-            StartOutcome::Started => println!("{name}: started"),
+            StartOutcome::Started => self.report_started(name, "started"),
         }
         Ok(())
     }
 
+    /// Reports a service launchd was just asked to run, unless `hum run`
+    /// would refuse to start it: then says why, and whether launchd keeps
+    /// trying.
+    fn report_started(&self, name: &ServiceName, verb: &str) {
+        let Some(why) = self.app.run_blocker(name) else {
+            println!("{name}: {verb}");
+            return;
+        };
+        let next = match config::load_service(&self.app.paths, name).map(|s| s.restart) {
+            Ok(Restart::Never) => format!("run `hum start {name}` once that is fixed"),
+            _ => "launchd retries it, so it starts once that is fixed".into(),
+        };
+        println!("{name}: registered but not running: {why}; {next}");
+    }
+
     fn report_change(&self, name: &ServiceName, outcome: ChangeOutcome) {
         match outcome {
-            ChangeOutcome::Restarted => println!("{name}: restarted"),
+            ChangeOutcome::Restarted => self.report_started(name, "restarted"),
             ChangeOutcome::NeedsRestart { running: true } => {
                 println!(
                     "{name}: still running with the old config; run `hum restart {name}` to apply"
@@ -675,7 +691,10 @@ impl Ctx {
                 };
                 let command = match &r.config {
                     ConfigState::Ok { command, .. } => command.clone(),
-                    ConfigState::Invalid { error } => format!("invalid config: {error}"),
+                    ConfigState::Invalid { error } => format!(
+                        "invalid config: {}",
+                        one_line(error, &self.app.paths.services_dir())
+                    ),
                     ConfigState::Missing => "(no config)".into(),
                 };
                 [format!("{}{mark}", r.name), state, pid, exit, command]
@@ -725,17 +744,15 @@ impl Ctx {
             ["log".into(), r.log.display().to_string()],
         ]);
         if let Some(reason) = &r.out_of_sync {
-            info.push([
-                "launchd".into(),
-                format!("{reason}; run `hum restart {name}` to apply"),
-            ]);
+            let fix = app::sync_fix(name, r.launchd.state == State::Disabled);
+            info.push(["launchd".into(), format!("{reason}; {fix}")]);
         }
         print_table(&[], &info);
         println!("\nenvironment:");
         let rows: Vec<[String; 3]> = r
             .env
             .iter()
-            .map(|v| [format!("  {}", v.key), v.value.clone(), v.source.clone()])
+            .map(|v| [format!("  {}", v.key), v.source.clone(), v.value.clone()])
             .collect();
         print_table(&[], &rows);
         if let Some(e) = &r.env_error {
@@ -880,6 +897,27 @@ impl Ctx {
     }
 }
 
+/// A config error on one table row: the file path, which the row already
+/// names, and the source excerpt of a TOML parse error are dropped.
+fn one_line(error: &str, services_dir: &Path) -> String {
+    let error = error
+        .strip_prefix(&format!("{}/", services_dir.display()))
+        .and_then(|e| e.split_once(": ").map(|(_, rest)| rest))
+        .unwrap_or(error);
+    error
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('|') && !is_excerpt(l))
+        .collect::<Vec<_>>()
+        .join(": ")
+}
+
+/// A `12 | source text` line of a TOML parse error.
+fn is_excerpt(line: &str) -> bool {
+    line.split_once(" |")
+        .is_some_and(|(n, _)| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()))
+}
+
 fn last_exit(code: Option<i32>, signal: Option<&str>) -> String {
     match (signal, code) {
         (Some(s), _) => s.into(),
@@ -936,6 +974,16 @@ mod tests {
             "hum", "new", "t3", "--env", "A=1", "--", "t3", "--port", "1",
         ];
         assert!(Cli::try_parse_from(ok).is_ok());
+    }
+
+    // Requirement: ls output
+    #[test]
+    fn ls_shows_a_config_error_on_one_line() {
+        let error = "/h/.config/hum/services/x.toml: TOML parse error at line 2, column 1\n  |\n2 | autostart = true\n  | ^^^^^^^^^\nunknown field `autostart`, expected one of `command`\n";
+        assert_eq!(
+            one_line(error, Path::new("/h/.config/hum/services")),
+            "TOML parse error at line 2, column 1: unknown field `autostart`, expected one of `command`"
+        );
     }
 
     // Requirement: File name is the service name

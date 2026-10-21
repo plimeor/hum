@@ -343,7 +343,10 @@ mod macos {
             N.fetch_add(1, Ordering::Relaxed)
         );
         let dir = tempfile::tempdir().unwrap();
-        let plist = dir.path().join(format!("{label}.plist"));
+        // launchd reports the real path; macOS temp dirs sit under /var.
+        let plist = std::fs::canonicalize(dir.path())
+            .unwrap()
+            .join(format!("{label}.plist"));
         let data = crate::plist::render(&crate::plist::Job {
             label: label.clone(),
             program_arguments: program.iter().map(|s| s.to_string()).collect(),
