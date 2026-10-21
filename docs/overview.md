@@ -3,7 +3,7 @@ Updated 2026-10-21
 
 ## What this is
 
-hum 是一个用 Go 写的 macOS CLI，把常驻后台命令（如 `t3 server`）注册成 launchd 服务，并用一个目录里的 TOML 文件统一管理它们。
+hum 是一个用 Rust 写的 macOS CLI，把常驻后台命令（如 `t3 server`）注册成 launchd 服务，并用一个目录里的 TOML 文件统一管理它们。
 
 ## Principles
 

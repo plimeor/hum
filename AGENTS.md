@@ -6,17 +6,17 @@ Read `docs/overview.md` before starting work.
 
 | Concept | Location |
 |---|---|
-| Commands and flags | `internal/cli` |
-| Operations (start, stop, apply, doctor, run preparation) | `internal/app` |
-| Config files, paths, validation | `internal/config` |
-| `.env` parsing and expansion | `internal/dotenv` |
-| Environment assembly for `hum run` | `internal/envx` |
-| launchctl wrapper (`Manager` interface) | `internal/launchd` |
-| plist rendering | `internal/plist` |
-| Comment-preserving TOML edits (`set` / `unset`) | `internal/tomledit` |
-| Log rotation, tail, follow | `internal/logfile` |
+| Commands, flags and output | `src/cli.rs` |
+| Operations (start, stop, apply, doctor, run preparation) | `src/app.rs` |
+| Config files, paths, validation | `src/config.rs` |
+| `.env` parsing and expansion | `src/dotenv.rs` |
+| Environment assembly for `hum run` | `src/environ.rs` |
+| launchctl wrapper (`Manager` trait) | `src/launchd.rs` |
+| plist rendering (golden files in `testdata/`) | `src/plist.rs` |
+| Comment-preserving TOML edits (`set` / `unset`) | `src/tomledit.rs` |
+| Log rotation, tail, follow | `src/logfile.rs` |
 
-Checks: `go vet ./...` and `go test ./...` run on any OS; launchd behavior needs a real Mac.
+Checks: `cargo fmt --check`, `cargo clippy --all-targets` and `cargo test` run on any OS; launchd behavior needs a real Mac. Regenerate plist golden files with `UPDATE_GOLDEN=1 cargo test`.
 
 ## Docs conventions
 - `docs/overview.md`: what this project is, its principles, current focus, and non-goals. Read it before starting work. Non-goals are not to be implemented or proposed.
