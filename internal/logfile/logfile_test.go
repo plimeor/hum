@@ -19,72 +19,93 @@ func read(t *testing.T, p string) string {
 	return string(b)
 }
 
-func TestRotateNumberingAndTruncate(t *testing.T) {
-	p := filepath.Join(t.TempDir(), "t3.log")
+var t0 = time.Date(2026, 10, 21, 14, 0, 0, 0, time.Local)
+
+func TestRotateNamingRetainAndTruncate(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "t3.log")
+	// A service named "t3__x" must not be mistaken for a rotated t3 log.
+	os.WriteFile(filepath.Join(dir, "t3__x.log"), []byte("other service"), 0o644)
 	for i, content := range []string{"one", "two", "three", "four"} {
 		os.WriteFile(p, []byte(content), 0o644)
 		// Keep the inode: rotation must truncate, not replace, the file.
 		before, _ := os.Stat(p)
-		if err := Rotate(p, 3); err != nil {
-			t.Fatal(err)
+		rotated, err := Rotate(p, 3, t0.Add(time.Duration(i)*time.Hour))
+		if err != nil || !rotated {
+			t.Fatal(rotated, err)
 		}
 		after, _ := os.Stat(p)
 		if !os.SameFile(before, after) || after.Size() != 0 {
 			t.Fatalf("round %d: log must be truncated in place", i)
 		}
 	}
-	if read(t, p+".1") != "four" || read(t, p+".2") != "three" || read(t, p+".3") != "two" {
-		t.Fatal("history order wrong")
-	}
-	if _, err := os.Stat(p + ".4"); !os.IsNotExist(err) {
-		t.Fatal(".4 must not exist with keep=3")
-	}
-}
-
-func TestRotateKeepLoweredPrunes(t *testing.T) {
-	p := filepath.Join(t.TempDir(), "x.log")
-	for _, s := range []string{"1", "2", "3", "4", "cur"} {
-		suffix := "." + s
-		if s == "cur" {
-			suffix = ""
-		}
-		os.WriteFile(p+suffix, []byte(s), 0o644)
-	}
-	if err := Rotate(p, 1); err != nil {
+	files, err := Rotated(p)
+	if err != nil {
 		t.Fatal(err)
 	}
-	matches, _ := filepath.Glob(p + ".*")
-	if len(matches) != 1 || read(t, p+".1") != "cur" {
-		t.Fatalf("history = %v", matches)
+	var names []string
+	for _, f := range files {
+		names = append(names, filepath.Base(f))
+	}
+	want := "t3__2026-10-21_17-00-00.log,t3__2026-10-21_16-00-00.log,t3__2026-10-21_15-00-00.log"
+	if strings.Join(names, ",") != want {
+		t.Fatalf("rotated = %v", names)
+	}
+	if read(t, files[0]) != "four" || read(t, files[2]) != "two" {
+		t.Fatal("contents in wrong files")
+	}
+	if read(t, filepath.Join(dir, "t3__x.log")) != "other service" {
+		t.Fatal("another service's log was touched")
 	}
 }
 
-func TestRotateKeepZero(t *testing.T) {
+func TestRotateSameSecond(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "x.log")
+	for _, c := range []string{"a", "b", "c"} {
+		os.WriteFile(p, []byte(c), 0o644)
+		if _, err := Rotate(p, 5, t0); err != nil {
+			t.Fatal(err)
+		}
+	}
+	files, _ := Rotated(p)
+	if len(files) != 3 || read(t, files[0]) != "c" || read(t, files[2]) != "a" {
+		t.Fatalf("files = %v", files)
+	}
+	if !strings.HasSuffix(files[0], "x__2026-10-21_14-00-00_2.log") {
+		t.Fatalf("newest = %s", files[0])
+	}
+}
+
+func TestRotateEmptyAndKeepZero(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "x.log")
+	os.WriteFile(p, nil, 0o644)
+	if rotated, err := Rotate(p, 3, t0); rotated || err != nil {
+		t.Fatal("empty log must not rotate")
+	}
 	os.WriteFile(p, []byte("data"), 0o644)
-	if err := Rotate(p, 0); err != nil {
+	if _, err := Rotate(p, 0, t0); err != nil {
 		t.Fatal(err)
 	}
 	if read(t, p) != "" {
 		t.Fatal("not truncated")
 	}
-	if m, _ := filepath.Glob(p + ".*"); len(m) != 0 {
-		t.Fatalf("keep=0 left %v", m)
+	if files, _ := Rotated(p); len(files) != 0 {
+		t.Fatalf("keep=0 left %v", files)
 	}
 }
 
 func TestRotateIfNeeded(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "x.log")
-	if rotated, err := RotateIfNeeded(p, 10, 3); rotated || err != nil {
+	if rotated, err := RotateIfNeeded(p, 10, 3, t0); rotated || err != nil {
 		t.Fatal("missing file must be a no-op")
 	}
 	os.WriteFile(p, []byte("small"), 0o644)
-	if rotated, _ := RotateIfNeeded(p, 10, 3); rotated {
+	if rotated, _ := RotateIfNeeded(p, 10, 3, t0); rotated {
 		t.Fatal("rotated below max size")
 	}
-	os.WriteFile(p, []byte("larger than ten"), 0o644)
-	if rotated, _ := RotateIfNeeded(p, 10, 3); !rotated {
-		t.Fatal("did not rotate above max size")
+	os.WriteFile(p, []byte("exactly10!"), 0o644)
+	if rotated, _ := RotateIfNeeded(p, 10, 3, t0); !rotated {
+		t.Fatal("did not rotate at max size")
 	}
 }
 

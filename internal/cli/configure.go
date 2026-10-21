@@ -156,7 +156,8 @@ func newEdit(st *state) *cobra.Command {
 			}
 			fmt.Fprintf(st.out, "saved %s\n", path)
 			if global {
-				return st.applyGlobalChange(!noRestart)
+				fmt.Fprintln(st.out, "global config takes effect when each service next restarts; run `hum restart --all` to apply it now")
+				return nil
 			}
 			s, _ := config.ParseService(args[0], edited)
 			warnMissingEnvFiles(st, s)
@@ -164,7 +165,7 @@ func newEdit(st *state) *cobra.Command {
 		},
 	}
 	cmd.Flags().BoolVar(&global, "global", false, "edit config.toml")
-	cmd.Flags().BoolVar(&noRestart, "no-restart", false, "do not restart running services")
+	cmd.Flags().BoolVar(&noRestart, "no-restart", false, "do not restart the service if it is running")
 	return cmd
 }
 
@@ -229,16 +230,6 @@ func runEditor(file string) error {
 		return fmt.Errorf("editor %q: %w", editor, err)
 	}
 	return nil
-}
-
-// applyGlobalChange restarts every running service, since global [env]
-// and [log] affect all of them.
-func (st *state) applyGlobalChange(restart bool) error {
-	names, err := st.app.Paths.ServiceNames()
-	if err != nil {
-		return err
-	}
-	return st.each(names, func(n string) error { return st.app.ApplyConfigChange(n, restart) })
 }
 
 // setKeys are the keys `hum set` accepts besides env.*.

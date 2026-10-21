@@ -1,9 +1,10 @@
 // Package logfile rotates and reads service logs.
 //
-// Rotation is copytruncate: launchd opens the log once when it starts the
-// job and hands the descriptor to the process, so renaming the file would
-// leave the process writing to the renamed copy. Lines written between
-// the copy and the truncate are lost.
+// Rotation follows pm2-logrotate: the log is copied to a timestamped file
+// (<name>__YYYY-MM-DD_HH-mm-ss.log) and then truncated in place, and only
+// the newest keep copies are retained. The log is never renamed, because
+// launchd opens it once when it starts the job and hands the descriptor to
+// the process. Lines written between the copy and the truncate are lost.
 package logfile
 
 import (
@@ -14,42 +15,69 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
 )
 
-// Rotate shifts <path>.1 … <path>.<keep-1> up by one, drops anything past
-// keep, copies path to <path>.1 and truncates path. A missing log is not an
-// error.
-func Rotate(path string, keep int) error {
-	if _, err := os.Stat(path); os.IsNotExist(err) {
-		return nil
-	} else if err != nil {
-		return err
+// stampLayout is pm2-logrotate's default dateFormat, YYYY-MM-DD_HH-mm-ss.
+const stampLayout = "2006-01-02_15-04-05"
+
+var stampRe = regexp.MustCompile(`^__\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}(_\d+)?\.log$`)
+
+// Rotated lists the rotated copies of the log at path, newest first.
+func Rotated(path string) ([]string, error) {
+	base := strings.TrimSuffix(filepath.Base(path), ".log")
+	entries, err := os.ReadDir(filepath.Dir(path))
+	if os.IsNotExist(err) {
+		return nil, nil
 	}
-	if err := pruneAbove(path, keep); err != nil {
-		return err
+	if err != nil {
+		return nil, err
 	}
-	if keep > 0 {
-		for i := keep - 1; i >= 1; i-- {
-			from := path + "." + strconv.Itoa(i)
-			if _, err := os.Stat(from); err == nil {
-				if err := os.Rename(from, path+"."+strconv.Itoa(i+1)); err != nil {
-					return err
-				}
-			}
+	var out []string
+	for _, e := range entries {
+		n := e.Name()
+		// Match the exact stamp so that service "t3" never claims the
+		// current log of a service named "t3__x".
+		if strings.HasPrefix(n, base) && stampRe.MatchString(n[len(base):]) {
+			out = append(out, filepath.Join(filepath.Dir(path), n))
 		}
-		if err := copyFile(path, path+".1"); err != nil {
-			return err
-		}
 	}
-	return os.Truncate(path, 0)
+	sort.Sort(sort.Reverse(byStamp(out)))
+	return out, nil
 }
 
-// RotateIfNeeded rotates when the log is larger than maxSize. It reports
-// whether it rotated.
-func RotateIfNeeded(path string, maxSize int64, keep int) (bool, error) {
+// byStamp orders rotated names by timestamp, then by collision suffix.
+type byStamp []string
+
+func (b byStamp) Len() int      { return len(b) }
+func (b byStamp) Swap(i, j int) { b[i], b[j] = b[j], b[i] }
+func (b byStamp) Less(i, j int) bool {
+	si, ni := splitStamp(b[i])
+	sj, nj := splitStamp(b[j])
+	if si != sj {
+		return si < sj
+	}
+	return ni < nj
+}
+
+func splitStamp(name string) (string, int) {
+	name = strings.TrimSuffix(name, ".log")
+	stamp := name[strings.LastIndex(name, "__")+2:]
+	if i := strings.IndexByte(stamp[len(stampLayout):], '_'); i >= 0 {
+		n, _ := strconv.Atoi(stamp[len(stampLayout)+i+1:])
+		return stamp[:len(stampLayout)], n
+	}
+	return stamp, 0
+}
+
+// Rotate copies a non-empty log to <name>__<now>.log, truncates it and
+// deletes all but the newest keep copies. A missing or empty log is left
+// alone. It reports whether it rotated.
+func Rotate(path string, keep int, now time.Time) (bool, error) {
 	info, err := os.Stat(path)
 	if os.IsNotExist(err) {
 		return false, nil
@@ -57,25 +85,59 @@ func RotateIfNeeded(path string, maxSize int64, keep int) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	if info.Size() <= maxSize {
+	if info.Size() == 0 {
 		return false, nil
 	}
-	return true, Rotate(path, keep)
+	if keep > 0 {
+		dst := rotatedName(path, now)
+		if err := copyFile(path, dst); err != nil {
+			return false, err
+		}
+	}
+	if err := os.Truncate(path, 0); err != nil {
+		return false, err
+	}
+	return true, prune(path, keep)
 }
 
-// pruneAbove removes <path>.N for N >= keep, so that after the shift at
-// most keep history files remain.
-func pruneAbove(path string, keep int) error {
-	matches, err := filepath.Glob(path + ".*")
+// RotateIfNeeded rotates when the log has reached maxSize.
+func RotateIfNeeded(path string, maxSize int64, keep int, now time.Time) (bool, error) {
+	info, err := os.Stat(path)
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if info.Size() < maxSize {
+		return false, nil
+	}
+	return Rotate(path, keep, now)
+}
+
+// rotatedName picks a stamped name that is not taken yet; two rotations
+// within one second get a _1, _2… suffix.
+func rotatedName(path string, now time.Time) string {
+	prefix := strings.TrimSuffix(path, ".log") + "__" + now.Format(stampLayout)
+	name := prefix + ".log"
+	for i := 1; ; i++ {
+		if _, err := os.Stat(name); os.IsNotExist(err) {
+			return name
+		}
+		name = prefix + "_" + strconv.Itoa(i) + ".log"
+	}
+}
+
+func prune(path string, keep int) error {
+	files, err := Rotated(path)
 	if err != nil {
 		return err
 	}
-	for _, m := range matches {
-		n, err := strconv.Atoi(strings.TrimPrefix(m, path+"."))
-		if err != nil || n < keep || n < 1 {
-			continue
-		}
-		if err := os.Remove(m); err != nil && !os.IsNotExist(err) {
+	if keep < 0 {
+		keep = 0
+	}
+	for i := keep; i < len(files); i++ {
+		if err := os.Remove(files[i]); err != nil && !os.IsNotExist(err) {
 			return err
 		}
 	}

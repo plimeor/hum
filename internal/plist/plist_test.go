@@ -50,7 +50,7 @@ func TestRenderNeverWithInterval(t *testing.T) {
 	golden(t, "rotate.plist", Render(Job{
 		Label:            "hum._rotate",
 		ProgramArguments: []string{"/opt/homebrew/bin/hum", "logs", "--rotate", "--all", "--if-oversize"},
-		StartInterval:    3600,
+		StartInterval:    30,
 		LogPath:          "/Users/me/Library/Logs/hum/_rotate.log",
 	}))
 }

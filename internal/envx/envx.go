@@ -17,7 +17,7 @@ import (
 )
 
 // BaseKeys are the only variables taken from the calling process.
-var BaseKeys = []string{"HOME", "USER", "SHELL", "TMPDIR", "LANG"}
+var BaseKeys = []string{"HOME", "USER", "SHELL", "TMPDIR"}
 
 // Source labels for layers that are not files.
 const (

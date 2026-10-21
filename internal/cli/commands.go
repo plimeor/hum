@@ -11,6 +11,7 @@ import (
 	"sync"
 	"syscall"
 	"text/tabwriter"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -288,16 +289,21 @@ func newLogs(st *state) *cobra.Command {
 					maxSize, keep := config.EffectiveLog(g, s)
 					path := a.Paths.LogFile(n)
 					if ifOversize {
-						rotated, err := logfile.RotateIfNeeded(path, maxSize, keep)
+						rotated, err := logfile.RotateIfNeeded(path, maxSize, keep, time.Now())
 						if rotated {
 							fmt.Fprintf(st.out, "%s: rotated\n", n)
 						}
 						return err
 					}
-					if err := logfile.Rotate(path, keep); err != nil {
+					rotated, err := logfile.Rotate(path, keep, time.Now())
+					if err != nil {
 						return err
 					}
-					fmt.Fprintf(st.out, "%s: rotated\n", n)
+					if rotated {
+						fmt.Fprintf(st.out, "%s: rotated\n", n)
+					} else {
+						fmt.Fprintf(st.out, "%s: log is empty, nothing to rotate\n", n)
+					}
 					return nil
 				})
 			}
@@ -352,7 +358,7 @@ func newLogs(st *state) *cobra.Command {
 	f.BoolVarP(&follow, "follow", "f", false, "keep printing new lines")
 	f.IntVarP(&lines, "lines", "n", 100, "number of lines to show")
 	f.BoolVar(&rotate, "rotate", false, "rotate now, regardless of size")
-	f.BoolVar(&ifOversize, "if-oversize", false, "with --rotate: only rotate logs over max_size (used by the hourly job)")
+	f.BoolVar(&ifOversize, "if-oversize", false, "with --rotate: only rotate logs at or over max_size (used by the periodic job)")
 	_ = f.MarkHidden("if-oversize")
 	return cmd
 }

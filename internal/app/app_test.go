@@ -13,6 +13,7 @@ import (
 	"github.com/plimeor/hum/internal/config"
 	"github.com/plimeor/hum/internal/envx"
 	"github.com/plimeor/hum/internal/launchd"
+	"github.com/plimeor/hum/internal/logfile"
 )
 
 // fakeLD models the parts of launchd hum relies on.
@@ -332,8 +333,12 @@ func TestPrepareRunRotatesOversizedLog(t *testing.T) {
 	if _, err := a.PrepareRun("x", nil); err != nil {
 		t.Fatal(err)
 	}
-	if b, _ := os.ReadFile(a.Paths.LogFile("x") + ".1"); string(b) != "more than ten bytes" {
-		t.Fatal("log not rotated before start")
+	files, _ := logfile.Rotated(a.Paths.LogFile("x"))
+	if len(files) != 1 {
+		t.Fatalf("log not rotated before start: %v", files)
+	}
+	if b, _ := os.ReadFile(files[0]); string(b) != "more than ten bytes" {
+		t.Fatal("rotated copy has wrong content")
 	}
 }
 

@@ -2,6 +2,7 @@ package app
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/plimeor/hum/internal/config"
 	"github.com/plimeor/hum/internal/envx"
@@ -29,7 +30,7 @@ func (a *App) PrepareRun(name string, base map[string]string) (*Exec, error) {
 		return nil, err
 	}
 	maxSize, keep := config.EffectiveLog(g, s)
-	if _, err := logfile.RotateIfNeeded(a.Paths.LogFile(name), maxSize, keep); err != nil {
+	if _, err := logfile.RotateIfNeeded(a.Paths.LogFile(name), maxSize, keep, time.Now()); err != nil {
 		a.warnf("log rotation: %v", err)
 	}
 	env, err := envx.Assemble(base, g, s, a.Paths.Home)

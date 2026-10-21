@@ -15,8 +15,9 @@ import (
 	"github.com/plimeor/hum/internal/plist"
 )
 
-// RotateInterval is how often the internal rotate job runs, in seconds.
-const RotateInterval = 3600
+// RotateInterval is how often the internal rotate job checks log sizes, in
+// seconds (pm2-logrotate's workerInterval default).
+const RotateInterval = 30
 
 // App ties paths, launchd and output together.
 type App struct {
@@ -276,7 +277,7 @@ func (a *App) ApplyConfigChange(name string, restart bool) error {
 	return a.Restart(name)
 }
 
-// EnsureRotateJob installs and loads the hourly rotate job.
+// EnsureRotateJob installs and loads the periodic rotate job.
 func (a *App) EnsureRotateJob() error {
 	label := config.Label(config.RotateName)
 	changed, err := a.writePlist(config.RotateName, a.renderRotatePlist())

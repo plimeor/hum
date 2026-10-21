@@ -16,7 +16,7 @@ func TestAssemblePriorityAndSources(t *testing.T) {
 	os.WriteFile(filepath.Join(cwd, ".env"), []byte("A=env1\nB=env1\nDATA=${HOME}/data\nP=$PATH:/extra\n"), 0o644)
 	os.WriteFile(filepath.Join(cwd, ".env.local"), []byte("B=env2\nC=$A-$SVC\n"), 0o644)
 
-	base := map[string]string{"HOME": home, "USER": "me", "LANG": "C"}
+	base := map[string]string{"HOME": home, "USER": "me"}
 	g := &config.Global{Env: map[string]string{"PATH": "/usr/bin", "A": "global", "LANG": "en_US.UTF-8"}}
 	s := &config.Service{
 		Cwd:     cwd,
