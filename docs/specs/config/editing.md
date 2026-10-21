@@ -29,7 +29,7 @@ Type: feature
 `hum set` 或 `hum unset` 的结果不是有效配置时，必须报错退出，且不得修改文件。
 
 ### Requirement: 服务配置改动的生效
-服务配置经 `edit`、`set` 或 `unset` 改动后，如果服务正在运行，hum 必须自动 restart 它；给出 `--no-restart` 时不得重启，并提示需要 restart 才能生效。
+服务配置经 `edit`、`set` 或 `unset` 改动后，如果服务正在运行，hum 必须自动 restart 它；给出 `--no-restart` 时，或服务已被 launchd 加载但未在运行时，不得重启或启动它，并提示需要 restart 才能生效，在此之前 `hum ls` 必须把它标为与 launchd 不一致。
 
 ### Requirement: 全局配置改动不重启
 `hum edit --global` 改动后不得重启任何服务，必须输出一行提示：改动会在各服务下次重启后生效。

@@ -73,6 +73,7 @@ mod tests {
         );
     }
 
+    // Requirement: 重启策略, 登录自启
     #[test]
     fn always() {
         golden(
@@ -89,6 +90,7 @@ mod tests {
         );
     }
 
+    // Requirement: 重启策略, 登录自启, 配置目录位置
     #[test]
     fn on_failure_without_autostart() {
         golden(
@@ -110,6 +112,7 @@ mod tests {
         );
     }
 
+    // Requirement: 自动轮转
     #[test]
     fn rotate_job() {
         golden(

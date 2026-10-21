@@ -231,6 +231,7 @@ mod tests {
         assert_eq!(fs::read_to_string(&other).unwrap(), "other service");
     }
 
+    // Requirement: 轮转方式
     #[test]
     fn same_second_gets_suffixes() {
         let dir = tempfile::tempdir().unwrap();

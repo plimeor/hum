@@ -1,4 +1,4 @@
-//! Command definitions and handlers.
+//! Command definitions, handlers and output.
 
 use std::collections::BTreeMap;
 use std::io::{BufRead, Write};
@@ -9,8 +9,8 @@ use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand, ValueEnum};
 use clap_complete::{ArgValueCandidates, CompletionCandidate};
 
-use crate::app::{self, App, Severity};
-use crate::config::{self, Command, Restart, Service};
+use crate::app::{App, ChangeOutcome, ConfigState, Severity, StartOutcome};
+use crate::config::{self, Command, EditKey, Restart, Service, ServiceName};
 use crate::{environ, logfile, tomledit};
 
 /// Exit with this status without printing anything more.
@@ -29,8 +29,8 @@ fn service_candidates() -> Vec<CompletionCandidate> {
     config::Paths::from_env()
         .and_then(|p| p.service_names())
         .unwrap_or_default()
-        .into_iter()
-        .map(CompletionCandidate::new)
+        .iter()
+        .map(|n| CompletionCandidate::new(n.to_string()))
         .collect()
 }
 
@@ -57,7 +57,7 @@ pub struct Cli {
 #[derive(clap::Args)]
 struct Targets {
     #[arg(add = names_arg())]
-    names: Vec<String>,
+    names: Vec<ServiceName>,
     /// All services
     #[arg(long)]
     all: bool,
@@ -70,7 +70,7 @@ enum Cmd {
         after_help = "Examples:\n  hum new t3 -- t3 server\n  hum new api --cwd ~/work/api --env PORT=4000 --env-file .env --restart on-failure -- bun run start"
     )]
     New {
-        name: String,
+        name: ServiceName,
         /// Working directory (default: current directory)
         #[arg(long)]
         cwd: Option<String>,
@@ -95,7 +95,7 @@ enum Cmd {
     /// Edit a config in $EDITOR, validate it, apply it
     Edit {
         #[arg(add = names_arg(), required_unless_present = "global", conflicts_with = "global")]
-        name: Option<String>,
+        name: Option<ServiceName>,
         /// Edit config.toml
         #[arg(long)]
         global: bool,
@@ -109,7 +109,7 @@ enum Cmd {
     )]
     Set {
         #[arg(add = names_arg())]
-        name: String,
+        name: ServiceName,
         #[arg(required = true, value_name = "KEY=VALUE")]
         pairs: Vec<String>,
         /// Do not restart the service if it is running
@@ -121,7 +121,7 @@ enum Cmd {
     /// Remove config fields
     Unset {
         #[arg(add = names_arg())]
-        name: String,
+        name: ServiceName,
         #[arg(required = true, value_name = "KEY")]
         keys: Vec<String>,
         /// Do not restart the service if it is running
@@ -147,7 +147,7 @@ enum Cmd {
     /// Show the resolved config, environment and launchd state
     Show {
         #[arg(add = names_arg())]
-        name: String,
+        name: ServiceName,
         /// Show environment variable values
         #[arg(long)]
         reveal: bool,
@@ -180,7 +180,7 @@ enum Cmd {
     /// Run a service in the foreground (what launchd invokes)
     Run {
         #[arg(add = names_arg())]
-        name: String,
+        name: ServiceName,
     },
     /// Print a shell completion script
     Completion { shell: Shell },
@@ -201,12 +201,12 @@ enum Shell {
 }
 
 pub fn run(cli: Cli) -> Result<()> {
-    // `hum run` is what launchd invokes, with launchd's short PATH, so it
-    // must not be the one to capture PATH.
     if let Cmd::Completion { shell } = cli.cmd {
         return completion(shell);
     }
     let app = App::new()?;
+    // `hum run` is what launchd invokes, with launchd's short PATH, so it
+    // must not be the one to capture PATH.
     if !matches!(cli.cmd, Cmd::Run { .. })
         && config::ensure_global(&app.paths, &std::env::var("PATH").unwrap_or_default())?
     {
@@ -236,22 +236,18 @@ pub fn run(cli: Cli) -> Result<()> {
                 RestartArg::OnFailure => Restart::OnFailure,
                 RestartArg::Never => Restart::Never,
             };
-            ctx.new_service(
-                &name,
-                cwd,
-                &env,
-                env_file,
-                restart,
-                !no_autostart,
-                !no_start,
-                command,
-            )
+            let s = ctx.new_service(name, cwd, &env, env_file, restart, !no_autostart, command)?;
+            if no_start {
+                ctx.app.write_new_plist(&s)
+            } else {
+                ctx.start(&s.name)
+            }
         }
         Cmd::Edit {
             name,
             global,
             no_restart,
-        } => ctx.edit(name.as_deref(), global, no_restart),
+        } => ctx.edit(name.as_ref(), global, no_restart),
         Cmd::Set {
             name,
             pairs,
@@ -267,9 +263,17 @@ pub fn run(cli: Cli) -> Result<()> {
             targets,
             keep_config,
         } => ctx.rm(&targets, keep_config),
-        Cmd::Start(t) => ctx.each(&ctx.targets(&t)?, |n| ctx.app.start(n)),
-        Cmd::Stop(t) => ctx.each(&ctx.targets(&t)?, |n| ctx.app.stop(n)),
-        Cmd::Restart(t) => ctx.each(&ctx.targets(&t)?, |n| ctx.app.restart(n)),
+        Cmd::Start(t) => ctx.each(&ctx.targets(&t)?, |n| ctx.start(n)),
+        Cmd::Stop(t) => ctx.each(&ctx.targets(&t)?, |n| {
+            ctx.app.stop(n)?;
+            println!("{n}: stopped");
+            Ok(())
+        }),
+        Cmd::Restart(t) => ctx.each(&ctx.targets(&t)?, |n| {
+            ctx.app.restart(n)?;
+            println!("{n}: restarted");
+            Ok(())
+        }),
         Cmd::Ls => ctx.ls(),
         Cmd::Show { name, reveal } => ctx.show(&name, reveal),
         Cmd::Logs {
@@ -316,35 +320,40 @@ fn warn_missing_env_files(app: &App, s: &Service) {
     }
 }
 
-fn read_line() -> String {
+/// A line from stdin, lowercased; None at end of input, which callers
+/// treat as declining so a closed stdin never loops or confirms.
+fn read_line() -> Option<String> {
     let mut line = String::new();
-    let _ = std::io::stdin().lock().read_line(&mut line);
-    line.trim().to_ascii_lowercase()
+    match std::io::stdin().lock().read_line(&mut line) {
+        Ok(0) | Err(_) => None,
+        Ok(_) => Some(line.trim().to_ascii_lowercase()),
+    }
 }
 
 impl Ctx {
-    fn targets(&self, t: &Targets) -> Result<Vec<String>> {
+    fn targets(&self, t: &Targets) -> Result<Vec<ServiceName>> {
         match (t.all, t.names.is_empty()) {
             (true, false) => bail!("give service names or --all, not both"),
             (true, true) => {
-                let names = self.app.paths.service_names()?;
+                let mut names = vec![];
+                for file in self.app.paths.service_files()? {
+                    match file {
+                        Ok(name) => names.push(name),
+                        Err(raw) => eprintln!("warning: skipping {raw:?}: invalid service name"),
+                    }
+                }
                 if names.is_empty() {
                     bail!("no services configured");
                 }
                 Ok(names)
             }
             (false, true) => bail!("give at least one service name, or --all"),
-            (false, false) => {
-                for n in &t.names {
-                    config::validate_name(n)?;
-                }
-                Ok(t.names.clone())
-            }
+            (false, false) => Ok(t.names.clone()),
         }
     }
 
     /// Runs `f` for every name, reporting failures and continuing.
-    fn each(&self, names: &[String], f: impl Fn(&str) -> Result<()>) -> Result<()> {
+    fn each(&self, names: &[ServiceName], f: impl Fn(&ServiceName) -> Result<()>) -> Result<()> {
         let mut failed = 0;
         for n in names {
             if let Err(e) = f(n) {
@@ -364,24 +373,46 @@ impl Ctx {
             return true;
         }
         eprint!("{prompt} [y/N] ");
-        matches!(read_line().as_str(), "y" | "yes")
+        matches!(read_line().as_deref(), Some("y" | "yes"))
     }
 
+    fn start(&self, name: &ServiceName) -> Result<()> {
+        match self.app.start(name)? {
+            StartOutcome::AlreadyRunning { pid } => {
+                let pid = pid.map_or("?".into(), |p| p.to_string());
+                println!("{name}: already running (pid {pid})");
+            }
+            StartOutcome::Started => println!("{name}: started"),
+        }
+        Ok(())
+    }
+
+    fn report_change(&self, name: &ServiceName, outcome: ChangeOutcome) {
+        match outcome {
+            ChangeOutcome::Restarted => println!("{name}: restarted"),
+            ChangeOutcome::NeedsRestart => {
+                println!(
+                    "{name}: launchd keeps the old definition; run `hum restart {name}` to apply"
+                )
+            }
+            ChangeOutcome::Applied => {}
+        }
+    }
+
+    /// Writes a new service config; returns it for starting.
     #[allow(clippy::too_many_arguments)]
     fn new_service(
         &self,
-        name: &str,
+        name: ServiceName,
         cwd: Option<String>,
         env: &[String],
         env_file: Vec<String>,
         restart: Restart,
         autostart: bool,
-        start: bool,
         command: Vec<String>,
-    ) -> Result<()> {
+    ) -> Result<Service> {
         let paths = &self.app.paths;
-        config::validate_name(name)?;
-        let file = paths.service_file(name);
+        let file = paths.service_file(&name);
         if file.exists() {
             bail!("service {name:?} already exists; use `hum edit {name}` or `hum set {name}`");
         }
@@ -398,7 +429,7 @@ impl Ctx {
             vars.insert(k.to_string(), v.to_string());
         }
         let s = Service {
-            name: name.into(),
+            name,
             command: Command::Argv(command),
             cwd: Some(config::contract_path(&cwd, &paths.home)),
             env_file,
@@ -408,7 +439,7 @@ impl Ctx {
             log: Default::default(),
         };
         let text = config::render_service(&s);
-        config::parse_service(name, &text)?;
+        let s = config::parse_service(&s.name, &text)?;
         let global = config::load_global(paths)?;
         let argv0 = &s.argv()[0];
         if environ::look_path(argv0, global.env.get("PATH").map_or("", |p| p)).is_none() {
@@ -417,33 +448,26 @@ impl Ctx {
         warn_missing_env_files(&self.app, &s);
         config::write_atomic(&file, text.as_bytes())?;
         println!("created {}", file.display());
-        if start {
-            self.app.start(name)
-        } else {
-            self.app.sync_plist(&s).map(drop)
-        }
+        Ok(s)
     }
 
-    fn edit(&self, name: Option<&str>, global: bool, no_restart: bool) -> Result<()> {
+    fn edit(&self, name: Option<&ServiceName>, global: bool, no_restart: bool) -> Result<()> {
         let paths = &self.app.paths;
         let (path, validate): (_, Validator) = match name {
             None => (
                 paths.global_file(),
                 Box::new(|t| config::parse_global(t).map(drop)),
             ),
-            Some(name) => {
-                config::validate_name(name)?;
-                (
-                    paths.service_file(name),
-                    Box::new(move |t| config::parse_service(name, t).map(drop)),
-                )
-            }
+            Some(name) => (
+                paths.service_file(name),
+                Box::new(move |t| config::parse_service(name, t).map(drop)),
+            ),
         };
         let orig = match std::fs::read_to_string(&path) {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound && !global => {
                 bail!(
                     "service {:?} not found; create it with `hum new`",
-                    name.unwrap_or_default()
+                    name.map_or("", |n| n)
                 )
             }
             r => r.with_context(|| path.display().to_string())?,
@@ -462,7 +486,9 @@ impl Ctx {
             }
             Some(name) => {
                 warn_missing_env_files(&self.app, &config::parse_service(name, &edited)?);
-                self.app.apply_config_change(name, !no_restart)
+                let outcome = self.app.apply_config_change(name, !no_restart)?;
+                self.report_change(name, outcome);
+                Ok(())
             }
         }
     }
@@ -508,7 +534,7 @@ impl Ctx {
             eprintln!("invalid config: {e:#}");
             let again = self.yes || {
                 eprint!("edit again? [Y/n] ");
-                matches!(read_line().as_str(), "" | "y" | "yes")
+                matches!(read_line().as_deref(), Some("" | "y" | "yes"))
             };
             if !again {
                 eprintln!("discarded changes; {} is unchanged", path.display());
@@ -519,7 +545,7 @@ impl Ctx {
 
     fn set(
         &self,
-        name: &str,
+        name: &ServiceName,
         pairs: &[String],
         command: &[String],
         no_restart: bool,
@@ -529,28 +555,21 @@ impl Ctx {
             for kv in pairs {
                 if kv == "command" {
                     if command.is_empty() {
-                        bail!("command: give the new command after --, e.g. `hum set t3 command -- t3 server`");
+                        bail!(
+                            "command: give the new command after --, e.g. `hum set t3 command -- t3 server`"
+                        );
                     }
-                    doc.set(&["command"], command.iter().collect::<toml_edit::Array>().into())?;
+                    let argv: toml_edit::Array = command.iter().collect();
+                    doc.set(&["command"], argv.into())?;
                     used_command = true;
                     continue;
                 }
-                let (k, v) = kv.split_once('=').with_context(|| format!("{kv:?}: expected key=value"))?;
-                let value: toml_edit::Value = match k {
-                    "autostart" => v
-                        .parse::<bool>()
-                        .map_err(|_| anyhow::anyhow!("autostart: expected true or false, got {v:?}"))?
-                        .into(),
-                    "log.keep" => v
-                        .parse::<i64>()
-                        .map_err(|_| anyhow::anyhow!("log.keep: expected an integer, got {v:?}"))?
-                        .into(),
-                    "env_file" => {
-                        v.split(',').map(str::trim).filter(|s| !s.is_empty()).collect::<toml_edit::Array>().into()
-                    }
-                    _ => v.into(),
-                };
-                doc.set(&key_path(k)?, value)?;
+                let (k, v) = kv
+                    .split_once('=')
+                    .with_context(|| format!("{kv:?}: expected key=value"))?;
+                let key = EditKey::parse(k)?;
+                let path: Vec<&str> = key.path.iter().map(String::as_str).collect();
+                doc.set(&path, key.value(v)?)?;
             }
             if !command.is_empty() && !used_command {
                 bail!("arguments after -- are only used with the `command` key");
@@ -559,13 +578,15 @@ impl Ctx {
         })
     }
 
-    fn unset(&self, name: &str, keys: &[String], no_restart: bool) -> Result<()> {
+    fn unset(&self, name: &ServiceName, keys: &[String], no_restart: bool) -> Result<()> {
         self.edit_service(name, no_restart, |doc| {
             for k in keys {
                 if k == "command" {
                     bail!("command is required and cannot be unset");
                 }
-                if !doc.unset(&key_path(k)?)? {
+                let key = EditKey::parse(k)?;
+                let path: Vec<&str> = key.path.iter().map(String::as_str).collect();
+                if !doc.unset(&path)? {
                     eprintln!("warning: {k} is not set");
                 }
             }
@@ -577,11 +598,10 @@ impl Ctx {
     /// back, then applies the change like `hum edit`.
     fn edit_service(
         &self,
-        name: &str,
+        name: &ServiceName,
         no_restart: bool,
         f: impl FnOnce(&mut tomledit::Doc) -> Result<()>,
     ) -> Result<()> {
-        config::validate_name(name)?;
         let path = self.app.paths.service_file(name);
         let orig = match std::fs::read_to_string(&path) {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -605,7 +625,9 @@ impl Ctx {
         config::write_atomic(&path, out.as_bytes())?;
         println!("saved {}", path.display());
         warn_missing_env_files(&self.app, &s);
-        self.app.apply_config_change(name, !no_restart)
+        let outcome = self.app.apply_config_change(name, !no_restart)?;
+        self.report_change(name, outcome);
+        Ok(())
     }
 
     fn rm(&self, targets: &Targets, keep_config: bool) -> Result<()> {
@@ -615,10 +637,20 @@ impl Ctx {
         } else {
             "stop and delete"
         };
-        if !self.confirm(&format!("{what} {}?", names.join(", "))) {
+        let list: Vec<&str> = names.iter().map(|n| &**n).collect();
+        if !self.confirm(&format!("{what} {}?", list.join(", "))) {
             bail!("aborted");
         }
-        self.each(&names, |n| self.app.remove(n, keep_config))
+        self.each(&names, |n| {
+            self.app.remove(n, keep_config)?;
+            if keep_config {
+                let cfg = self.app.paths.service_file(n);
+                println!("{n}: unregistered (config kept at {})", cfg.display());
+            } else {
+                println!("{n}: removed");
+            }
+            Ok(())
+        })
     }
 
     fn ls(&self) -> Result<()> {
@@ -634,119 +666,66 @@ impl Ctx {
         let table: Vec<[String; 5]> = rows
             .iter()
             .map(|r| {
-                let mark = if r.out_of_sync.is_some() { " *" } else { "" };
-                let command = match (&r.error, r.out_of_sync.as_deref()) {
-                    (Some(e), _) => format!("invalid config: {e}"),
-                    (None, Some(app::NO_CONFIG)) => "(no config)".into(),
-                    _ => r.command.clone().unwrap_or_default(),
+                let mark = if r.out_of_sync() { " *" } else { "" };
+                let (state, pid, exit) = match &r.launchd {
+                    Some(l) => (
+                        l.state.as_str().to_string(),
+                        l.pid.map_or("-".into(), |p| p.to_string()),
+                        last_exit(l.last_exit, l.last_signal.as_deref()),
+                    ),
+                    None => ("-".into(), "-".into(), "-".into()),
                 };
-                [
-                    format!("{}{mark}", r.name),
-                    r.state.map_or("-", |s| s.as_str()).into(),
-                    r.pid.map_or("-".into(), |p| p.to_string()),
-                    last_exit(r.last_exit, r.last_signal.as_deref()),
-                    command,
-                ]
+                let command = match &r.config {
+                    ConfigState::Ok { command, .. } => command.clone(),
+                    ConfigState::Invalid { error } => format!("invalid config: {error}"),
+                    ConfigState::Missing => "(no config)".into(),
+                };
+                [format!("{}{mark}", r.name), state, pid, exit, command]
             })
             .collect();
         print_table(&["NAME", "STATE", "PID", "LAST EXIT", "COMMAND"], &table);
-        if rows.iter().any(|r| r.out_of_sync.is_some()) {
+        if rows.iter().any(|r| r.out_of_sync()) {
             println!("\n* launchd does not match the config; run `hum apply`");
         }
         Ok(())
     }
 
-    fn show(&self, name: &str, reveal: bool) -> Result<()> {
-        let app = &self.app;
-        let s = config::load_service(&app.paths, name)?;
-        let global = config::load_global(&app.paths)?;
-        let label = config::label(name);
-        let st = app.ld.status(&label)?;
-        let state = app::State::of(&st, app.ld.disabled()?.contains(&label));
-        let (max_size, keep) = config::effective_log(&global, Some(&s));
-        let (env, env_err) = environ::assemble(&environ::base(), &global, &s, &app.paths.home);
-        let out_of_sync = match app.plist_current(&s) {
-            (false, _) => Some("plist missing"),
-            (true, false) => Some("plist outdated"),
-            _ => None,
-        };
-        let value = |k: &str| {
-            if reveal {
-                env.vars[k].clone()
-            } else {
-                "********".into()
-            }
-        };
+    fn show(&self, name: &ServiceName, reveal: bool) -> Result<()> {
+        let r = self.app.show(name, reveal)?;
         if self.json {
-            let vars: Vec<_> = env
-                .vars
-                .keys()
-                .map(|k| serde_json::json!({"key": k, "value": value(k), "source": env.sources[k]}))
-                .collect();
-            let undefined: Vec<_> = env
-                .undefined
-                .iter()
-                .map(|u| serde_json::json!({"file": u.file, "line": u.line, "name": u.name}))
-                .collect();
-            let doc = serde_json::json!({
-                "name": name, "label": label,
-                "config": app.paths.service_file(name), "plist": app.paths.plist_file(name), "log": app.paths.log_file(name),
-                "command": s.argv(), "shell": matches!(s.command, Command::Shell(_)),
-                "cwd": s.resolved_cwd(&app.paths.home), "env_file": s.resolved_env_files(&app.paths.home),
-                "autostart": s.autostart, "restart": s.restart.as_str(),
-                "log_max_size": max_size, "log_keep": keep,
-                "state": state, "pid": st.pid, "last_exit": st.last_exit, "last_signal": st.last_signal,
-                "out_of_sync": out_of_sync,
-                "env": vars, "env_error": env_err.as_ref().map(|e| e.to_string()), "undefined_refs": undefined,
-            });
-            println!("{}", serde_json::to_string_pretty(&doc)?);
+            println!("{}", serde_json::to_string_pretty(&r)?);
             return Ok(());
         }
+        let state = match r.launchd.pid {
+            Some(pid) => format!("{} (pid {pid})", r.launchd.state.as_str()),
+            None => r.launchd.state.as_str().into(),
+        };
         let mut info = vec![
-            ["name".into(), name.to_string()],
-            [
-                "state".into(),
-                match st.pid {
-                    Some(pid) => format!("{} (pid {pid})", state.as_str()),
-                    None => state.as_str().into(),
-                },
-            ],
+            ["name".into(), r.name.to_string()],
+            ["state".into(), state],
             [
                 "last exit".into(),
-                last_exit(st.last_exit, st.last_signal.as_deref()),
+                last_exit(r.launchd.last_exit, r.launchd.last_signal.as_deref()),
             ],
-            ["command".into(), s.command_string()],
-            [
-                "cwd".into(),
-                s.resolved_cwd(&app.paths.home).display().to_string(),
-            ],
+            ["command".into(), r.command_display.clone()],
+            ["cwd".into(), r.cwd.display().to_string()],
         ];
-        if !s.env_file.is_empty() {
-            let files: Vec<_> = s
-                .resolved_env_files(&app.paths.home)
-                .iter()
-                .map(|p| p.display().to_string())
-                .collect();
+        if !r.env_file.is_empty() {
+            let files: Vec<_> = r.env_file.iter().map(|p| p.display().to_string()).collect();
             info.push(["env_file".into(), files.join(", ")]);
         }
         info.extend([
-            ["autostart".into(), s.autostart.to_string()],
-            ["restart".into(), s.restart.as_str().into()],
+            ["autostart".into(), r.autostart.to_string()],
+            ["restart".into(), r.restart.as_str().into()],
             [
                 "log rotate".into(),
-                format!("max_size {max_size} bytes, keep {keep}"),
+                format!("max_size {} bytes, keep {}", r.log_max_size, r.log_keep),
             ],
-            [
-                "config".into(),
-                app.paths.service_file(name).display().to_string(),
-            ],
-            [
-                "plist".into(),
-                app.paths.plist_file(name).display().to_string(),
-            ],
-            ["log".into(), app.paths.log_file(name).display().to_string()],
+            ["config".into(), r.config.display().to_string()],
+            ["plist".into(), r.plist.display().to_string()],
+            ["log".into(), r.log.display().to_string()],
         ]);
-        if let Some(reason) = out_of_sync {
+        if let Some(reason) = &r.out_of_sync {
             info.push([
                 "launchd".into(),
                 format!("{reason}; run `hum apply` or `hum restart {name}`"),
@@ -754,16 +733,16 @@ impl Ctx {
         }
         print_table(&[], &info);
         println!("\nenvironment:");
-        let rows: Vec<[String; 3]> = env
-            .vars
-            .keys()
-            .map(|k| [format!("  {k}"), value(k), env.sources[k].clone()])
+        let rows: Vec<[String; 3]> = r
+            .env
+            .iter()
+            .map(|v| [format!("  {}", v.key), v.value.clone(), v.source.clone()])
             .collect();
         print_table(&[], &rows);
-        if let Some(e) = env_err {
+        if let Some(e) = &r.env_error {
             println!("  error: {e} (hum run would refuse to start)");
         }
-        for u in &env.undefined {
+        for u in &r.undefined_refs {
             println!(
                 "  warning: {}:{} references undefined ${{{}}} (expands to \"\")",
                 u.file, u.line, u.name
@@ -849,14 +828,18 @@ impl Ctx {
                 println!("nothing to do");
             }
             for a in &actions {
-                println!("would {} {}", a.kind.as_str(), a.name);
+                println!("would {} {} ({})", a.kind.as_str(), a.name, a.reason);
             }
             return Ok(());
         }
         if actions.is_empty() {
             println!("launchd is in sync");
         }
-        self.app.apply(&actions)?;
+        for a in &actions {
+            self.app.apply_action(a)?;
+            println!("{}: {} ({})", a.name, a.kind.as_str(), a.reason);
+        }
+        self.app.finish_apply()?;
         if problems.is_empty() {
             Ok(())
         } else {
@@ -881,8 +864,11 @@ impl Ctx {
         }
     }
 
-    fn run_service(&self, name: &str) -> Result<()> {
+    fn run_service(&self, name: &ServiceName) -> Result<()> {
         let ex = self.app.prepare_run(name, &environ::base())?;
+        for w in &ex.warnings {
+            eprintln!("warning: {w}");
+        }
         let mut argv = ex.argv.into_iter();
         let err = std::process::Command::new(&ex.program)
             .arg0(argv.next().unwrap_or_default())
@@ -892,22 +878,6 @@ impl Ctx {
             .current_dir(&ex.dir)
             .exec();
         Err(err).with_context(|| format!("{name}: exec {}", ex.program.display()))
-    }
-}
-
-/// Key paths `hum set` / `unset` accept.
-fn key_path(key: &str) -> Result<Vec<&str>> {
-    if let Some(var) = key.strip_prefix("env.") {
-        config::validate_env_key(var)?;
-        return Ok(vec!["env", var]);
-    }
-    match key {
-        "command" | "cwd" | "env_file" | "autostart" | "restart" | "log.max_size" | "log.keep" => {
-            Ok(key.split('.').collect())
-        }
-        _ => bail!(
-            "unknown key {key:?} (known: command, cwd, env_file, autostart, restart, env.<NAME>, log.max_size, log.keep)"
-        ),
     }
 }
 
@@ -959,22 +929,38 @@ mod tests {
         Cli::command().debug_assert();
     }
 
+    // Requirement: 新建服务
     #[test]
     fn new_requires_a_command_after_dashes() {
         assert!(Cli::try_parse_from(["hum", "new", "t3", "t3", "server"]).is_err());
-        assert!(
-            Cli::try_parse_from([
-                "hum", "new", "t3", "--env", "A=1", "--", "t3", "--port", "1"
-            ])
-            .is_ok()
-        );
+        let ok = [
+            "hum", "new", "t3", "--env", "A=1", "--", "t3", "--port", "1",
+        ];
+        assert!(Cli::try_parse_from(ok).is_ok());
     }
 
+    // Requirement: 文件名即服务名
     #[test]
-    fn set_keys() {
-        assert_eq!(key_path("env.PORT").unwrap(), ["env", "PORT"]);
-        assert_eq!(key_path("log.keep").unwrap(), ["log", "keep"]);
-        assert!(key_path("port").is_err());
-        assert!(key_path("env.A-B").is_err());
+    fn service_names_are_checked_while_parsing() {
+        assert!(Cli::try_parse_from(["hum", "start", "Bad.Name"]).is_err());
+        assert!(Cli::try_parse_from(["hum", "show", "_rotate"]).is_err());
+    }
+
+    // Requirement: 自动轮转
+    #[test]
+    fn rotate_job_arguments_parse() {
+        let args = std::iter::once("hum").chain(crate::app::ROTATE_ARGS);
+        let cli = Cli::try_parse_from(args).expect("the rotate job's arguments must parse");
+        let Cmd::Logs {
+            targets,
+            rotate,
+            if_oversize,
+            follow,
+            ..
+        } = cli.cmd
+        else {
+            panic!("rotate job does not run `hum logs`");
+        };
+        assert!(targets.all && rotate && if_oversize && !follow);
     }
 }

@@ -161,8 +161,7 @@ mod tests {
             "[env]\nPATH = \"/usr/bin\"\nA = \"global\"\nLANG = \"en_US.UTF-8\"",
         )
         .unwrap();
-        let svc = config::parse_service(
-            "t3",
+        let svc = config::parse_service(&"t3".parse().unwrap(),
             &format!(
                 "command = [\"a\"]\ncwd = \"{}\"\nenv_file = [\".env\", \".env.local\"]\n[env]\nA = \"svc\"\nSVC = \"literal $HOME\"\n",
                 cwd.display()
@@ -198,7 +197,11 @@ mod tests {
     #[test]
     fn missing_env_file() {
         let home = tempfile::tempdir().unwrap();
-        let svc = config::parse_service("x", "command = [\"a\"]\nenv_file = [\".env\"]").unwrap();
+        let svc = config::parse_service(
+            &"x".parse().unwrap(),
+            "command = [\"a\"]\nenv_file = [\".env\"]",
+        )
+        .unwrap();
         let (_, err) = assemble(&BTreeMap::new(), &Global::default(), &svc, home.path());
         let err = err.unwrap();
         assert_eq!(err.message, "no such file");

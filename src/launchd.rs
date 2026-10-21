@@ -268,3 +268,139 @@ mod tests {
         );
     }
 }
+
+/// Runs against the real launchctl in the user's GUI domain, with
+/// throwaway labels and plists in a temp dir. This is what keeps the test
+/// fake in `app` honest. On a Mac:
+/// `cargo test -- --ignored --test-threads=1 launchd::macos`
+#[cfg(all(test, target_os = "macos"))]
+mod macos {
+    use super::*;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    fn manager() -> Launchctl {
+        let uid = unsafe { libc::getuid() };
+        Launchctl {
+            domain: format!("gui/{uid}"),
+            bootout_timeout: Duration::from_secs(10),
+        }
+    }
+
+    /// A throwaway job; unloaded and re-enabled on drop.
+    struct Job {
+        label: String,
+        plist: PathBuf,
+        _dir: tempfile::TempDir,
+    }
+
+    impl Drop for Job {
+        fn drop(&mut self) {
+            let ld = manager();
+            let _ = ld.bootout(&self.label);
+            let _ = ld.enable(&self.label);
+        }
+    }
+
+    fn job(program: &[&str], run_at_load: bool) -> Job {
+        static N: AtomicU32 = AtomicU32::new(0);
+        let label = format!(
+            "local.hum-test.{}.{}",
+            std::process::id(),
+            N.fetch_add(1, Ordering::Relaxed)
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let plist = dir.path().join(format!("{label}.plist"));
+        let data = crate::plist::render(&crate::plist::Job {
+            label: label.clone(),
+            program_arguments: program.iter().map(|s| s.to_string()).collect(),
+            run_at_load,
+            ..Default::default()
+        });
+        std::fs::write(&plist, data).unwrap();
+        Job {
+            label,
+            plist,
+            _dir: dir,
+        }
+    }
+
+    fn wait_for(what: &str, mut cond: impl FnMut() -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !cond() {
+            assert!(Instant::now() < deadline, "timed out waiting for {what}");
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+
+    #[test]
+    #[ignore = "needs macOS launchd"]
+    fn load_status_and_unload() {
+        let ld = manager();
+        let j = job(&["/bin/sleep", "300"], true);
+        assert_eq!(
+            ld.status(&j.label).unwrap(),
+            Status::default(),
+            "unknown job"
+        );
+        ld.bootstrap(&j.plist).unwrap();
+        wait_for("running", || ld.status(&j.label).unwrap().running);
+        let st = ld.status(&j.label).unwrap();
+        assert!(st.loaded && st.pid.is_some());
+        assert_eq!(st.path.as_deref(), Some(&*j.plist.to_string_lossy()));
+        ld.bootout(&j.label).unwrap();
+        assert!(
+            !ld.status(&j.label).unwrap().loaded,
+            "bootout waits for unload"
+        );
+        ld.bootout(&j.label).unwrap();
+    }
+
+    // Requirement: start
+    #[test]
+    #[ignore = "needs macOS launchd"]
+    fn kickstart_runs_a_job_loaded_without_run_at_load() {
+        let ld = manager();
+        let j = job(&["/bin/sleep", "300"], false);
+        ld.bootstrap(&j.plist).unwrap();
+        let st = ld.status(&j.label).unwrap();
+        assert!(st.loaded && !st.running);
+        ld.kickstart(&j.label).unwrap();
+        wait_for("running", || ld.status(&j.label).unwrap().running);
+        ld.kickstart(&j.label).unwrap();
+        assert!(
+            ld.status(&j.label).unwrap().running,
+            "kickstart leaves a running job alone"
+        );
+    }
+
+    // Requirement: stop
+    #[test]
+    #[ignore = "needs macOS launchd"]
+    fn disabled_jobs_are_listed_and_refuse_bootstrap() {
+        let ld = manager();
+        let j = job(&["/bin/sleep", "300"], true);
+        ld.disable(&j.label).unwrap();
+        assert!(ld.disabled().unwrap().contains(&j.label));
+        assert!(
+            ld.bootstrap(&j.plist).is_err(),
+            "bootstrap of a disabled job fails"
+        );
+        ld.enable(&j.label).unwrap();
+        assert!(!ld.disabled().unwrap().contains(&j.label));
+        ld.bootstrap(&j.plist).unwrap();
+    }
+
+    // Requirement: 服务状态
+    #[test]
+    #[ignore = "needs macOS launchd"]
+    fn a_failed_job_reads_as_crashed() {
+        let ld = manager();
+        let j = job(&["/bin/sh", "-c", "exit 3"], true);
+        ld.bootstrap(&j.plist).unwrap();
+        wait_for("exit", || ld.status(&j.label).unwrap().last_exit.is_some());
+        let st = ld.status(&j.label).unwrap();
+        assert_eq!(st.last_exit, Some(3));
+        assert!(st.crashed(), "{st:?}");
+    }
+}

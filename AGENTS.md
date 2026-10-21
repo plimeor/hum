@@ -16,7 +16,12 @@ Read `docs/overview.md` before starting work.
 | Comment-preserving TOML edits (`set` / `unset`) | `src/tomledit.rs` |
 | Log rotation, tail, follow | `src/logfile.rs` |
 
-Checks: `cargo fmt --check`, `cargo clippy --all-targets` and `cargo test` run on any OS; launchd behavior needs a real Mac. Regenerate plist golden files with `UPDATE_GOLDEN=1 cargo test`.
+Checks:
+
+- `cargo fmt --check`, `cargo clippy --all-targets` and `cargo test` run on any OS. `cargo test` includes `tests/cli.rs`, which runs the binary for every command that does not reach launchd.
+- On a Mac, `cargo test -- --ignored --test-threads=1 launchd::macos` runs the launchctl wrapper against real launchd; run it after changing `src/launchd.rs` or the fake in `src/app.rs` tests.
+- Tests name the requirements they cover with `// Requirement: <name>, <name>`; a test fails when a name is not in `docs/specs/`.
+- Regenerate plist golden files with `UPDATE_GOLDEN=1 cargo test`.
 
 ## Docs conventions
 - `docs/overview.md`: what this project is, its principles, current focus, and non-goals. Read it before starting work. Non-goals are not to be implemented or proposed.

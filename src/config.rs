@@ -8,25 +8,54 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// Prefix of every launchd label hum owns.
 pub const LABEL_PREFIX: &str = "hum.";
 /// The internal log rotation job. Service names cannot start with "_".
 pub const ROTATE_NAME: &str = "_rotate";
-pub const DEFAULT_LOG_MAX_SIZE: &str = "10MB";
+pub const DEFAULT_LOG_MAX_SIZE: u64 = 10 << 20;
+const DEFAULT_LOG_MAX_SIZE_TEXT: &str = "10MB";
 pub const DEFAULT_LOG_KEEP: u64 = 3;
 
-pub fn validate_name(name: &str) -> Result<()> {
-    let mut chars = name.chars();
-    let ok = chars
-        .next()
-        .is_some_and(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
-        && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-');
-    if !ok {
-        bail!("invalid service name {name:?}: must match [a-z0-9][a-z0-9_-]*");
+/// A service name matching `[a-z0-9][a-z0-9_-]*`, so it is safe in file
+/// names and launchd labels. Checked once, where a name enters hum.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(transparent)]
+pub struct ServiceName(String);
+
+impl ServiceName {
+    pub fn parse(name: &str) -> Result<Self> {
+        let mut chars = name.chars();
+        let ok = chars
+            .next()
+            .is_some_and(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+            && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-');
+        if !ok {
+            bail!("invalid service name {name:?}: must match [a-z0-9][a-z0-9_-]*");
+        }
+        Ok(ServiceName(name.to_string()))
     }
-    Ok(())
+}
+
+impl std::str::FromStr for ServiceName {
+    type Err = anyhow::Error;
+    fn from_str(s: &str) -> Result<Self> {
+        ServiceName::parse(s)
+    }
+}
+
+impl std::ops::Deref for ServiceName {
+    type Target = str;
+    fn deref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for ServiceName {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
 }
 
 pub fn validate_env_key(key: &str) -> Result<()> {
@@ -101,16 +130,29 @@ impl Paths {
         self.log_dir.join(format!("{name}.log"))
     }
 
-    /// Services that have a config file, sorted.
-    pub fn service_names(&self) -> Result<Vec<String>> {
-        list_names(&self.services_dir(), "", ".toml")
+    /// Names of the files in `services/`, sorted. A name that is not a
+    /// valid service name is returned as the error for that entry.
+    pub fn service_files(&self) -> Result<Vec<Result<ServiceName, String>>> {
+        let names = list_names(&self.services_dir(), "", ".toml")?;
+        Ok(names
+            .into_iter()
+            .map(|n| ServiceName::parse(&n).map_err(|_| n))
+            .collect())
     }
 
-    /// Services that have a hum plist, sorted; the rotate job is excluded.
-    pub fn plist_names(&self) -> Result<Vec<String>> {
-        let mut names = list_names(&self.launch_agents, LABEL_PREFIX, ".plist")?;
-        names.retain(|n| n != ROTATE_NAME);
-        Ok(names)
+    /// Valid service names that have a config file, sorted.
+    pub fn service_names(&self) -> Result<Vec<ServiceName>> {
+        Ok(self.service_files()?.into_iter().flatten().collect())
+    }
+
+    /// Services that have a hum plist, sorted. Plists whose name is not a
+    /// valid service name, including the rotate job's, are excluded.
+    pub fn plist_names(&self) -> Result<Vec<ServiceName>> {
+        let names = list_names(&self.launch_agents, LABEL_PREFIX, ".plist")?;
+        Ok(names
+            .iter()
+            .filter_map(|n| ServiceName::parse(n).ok())
+            .collect())
     }
 }
 
@@ -179,7 +221,7 @@ pub fn write_atomic(path: &Path, data: &[u8]) -> Result<()> {
     Ok(())
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Restart {
     Always,
@@ -197,12 +239,31 @@ impl Restart {
     }
 }
 
-/// The `[log]` table, in the global or a service config.
-#[derive(Clone, Debug, Default, Deserialize)]
+#[derive(Default, Deserialize)]
 #[serde(deny_unknown_fields)]
+struct RawLog {
+    max_size: Option<String>,
+    keep: Option<i64>,
+}
+
+/// The `[log]` table, in the global or a service config.
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct LogSettings {
-    pub max_size: Option<String>,
-    pub keep: Option<i64>,
+    /// Bytes.
+    pub max_size: Option<u64>,
+    pub keep: Option<u64>,
+}
+
+fn parse_log(raw: RawLog) -> Result<LogSettings> {
+    let max_size = match raw.max_size {
+        Some(s) => Some(parse_size(&s).context("[log] max_size")?),
+        None => None,
+    };
+    let keep = match raw.keep {
+        Some(k) => Some(u64::try_from(k).map_err(|_| anyhow::anyhow!("[log] keep must be >= 0"))?),
+        None => None,
+    };
+    Ok(LogSettings { max_size, keep })
 }
 
 #[derive(Deserialize)]
@@ -217,7 +278,7 @@ struct RawService {
     #[serde(default)]
     env: BTreeMap<String, String>,
     #[serde(default)]
-    log: LogSettings,
+    log: RawLog,
 }
 
 /// The program a service runs.
@@ -231,7 +292,7 @@ pub enum Command {
 /// A parsed `services/<name>.toml`.
 #[derive(Clone, Debug)]
 pub struct Service {
-    pub name: String,
+    pub name: ServiceName,
     pub command: Command,
     /// As written; `None` means `$HOME`.
     pub cwd: Option<String>,
@@ -284,7 +345,7 @@ impl Service {
     }
 }
 
-pub fn parse_service(name: &str, text: &str) -> Result<Service> {
+pub fn parse_service(name: &ServiceName, text: &str) -> Result<Service> {
     let raw: RawService = toml::from_str(text)?;
     let command = match raw.command {
         None => bail!("command is required"),
@@ -310,21 +371,20 @@ pub fn parse_service(name: &str, text: &str) -> Result<Service> {
         bail!("env_file entries must not be empty");
     }
     validate_env(&raw.env)?;
-    validate_log(&raw.log)?;
+    let log = parse_log(raw.log)?;
     Ok(Service {
-        name: name.to_string(),
+        name: name.clone(),
         command,
         cwd: raw.cwd,
         env_file: raw.env_file,
         autostart: raw.autostart.unwrap_or(true),
         restart: raw.restart.unwrap_or(Restart::Always),
         env: raw.env,
-        log: raw.log,
+        log,
     })
 }
 
-pub fn load_service(paths: &Paths, name: &str) -> Result<Service> {
-    validate_name(name)?;
+pub fn load_service(paths: &Paths, name: &ServiceName) -> Result<Service> {
     let file = paths.service_file(name);
     let text = match fs::read_to_string(&file) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -335,21 +395,29 @@ pub fn load_service(paths: &Paths, name: &str) -> Result<Service> {
     parse_service(name, &text).with_context(|| file.display().to_string())
 }
 
-/// The parsed `config.toml`.
-#[derive(Clone, Debug, Default, Deserialize)]
+#[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct RawGlobal {
+    #[serde(default)]
+    env: BTreeMap<String, String>,
+    #[serde(default)]
+    log: RawLog,
+}
+
+/// The parsed `config.toml`.
+#[derive(Clone, Debug, Default)]
 pub struct Global {
-    #[serde(default)]
     pub env: BTreeMap<String, String>,
-    #[serde(default)]
     pub log: LogSettings,
 }
 
 pub fn parse_global(text: &str) -> Result<Global> {
-    let g: Global = toml::from_str(text)?;
-    validate_env(&g.env)?;
-    validate_log(&g.log)?;
-    Ok(g)
+    let raw: RawGlobal = toml::from_str(text)?;
+    validate_env(&raw.env)?;
+    Ok(Global {
+        env: raw.env,
+        log: parse_log(raw.log)?,
+    })
 }
 
 /// Reads `config.toml`; a missing file is an empty config.
@@ -375,8 +443,9 @@ pub fn ensure_global(paths: &Paths, path_env: &str) -> Result<bool> {
     if !path_env.is_empty() {
         text += &format!("PATH = {}\n", toml_edit::Value::from(path_env));
     }
-    text +=
-        &format!("\n[log]\n# max_size = \"{DEFAULT_LOG_MAX_SIZE}\"\n# keep = {DEFAULT_LOG_KEEP}\n");
+    text += &format!(
+        "\n[log]\n# max_size = \"{DEFAULT_LOG_MAX_SIZE_TEXT}\"\n# keep = {DEFAULT_LOG_KEEP}\n"
+    );
     fs::create_dir_all(paths.services_dir())?;
     write_atomic(&file, text.as_bytes())?;
     Ok(true)
@@ -385,32 +454,18 @@ pub fn ensure_global(paths: &Paths, path_env: &str) -> Result<bool> {
 /// Rotation settings: service over global over default.
 pub fn effective_log(global: &Global, service: Option<&Service>) -> (u64, u64) {
     let layers = [Some(&global.log), service.map(|s| &s.log)];
-    let mut size = DEFAULT_LOG_MAX_SIZE.to_string();
+    let mut size = DEFAULT_LOG_MAX_SIZE;
     let mut keep = DEFAULT_LOG_KEEP;
     for l in layers.into_iter().flatten() {
-        if let Some(s) = &l.max_size {
-            size = s.clone();
-        }
-        if let Some(k) = l.keep {
-            keep = k as u64;
-        }
+        size = l.max_size.unwrap_or(size);
+        keep = l.keep.unwrap_or(keep);
     }
-    (parse_size(&size).unwrap_or(10 << 20), keep) // validated on load
+    (size, keep)
 }
 
 fn validate_env(env: &BTreeMap<String, String>) -> Result<()> {
     for k in env.keys() {
         validate_env_key(k).context("[env]")?;
-    }
-    Ok(())
-}
-
-fn validate_log(log: &LogSettings) -> Result<()> {
-    if let Some(s) = &log.max_size {
-        parse_size(s).context("[log] max_size")?;
-    }
-    if log.keep.is_some_and(|k| k < 0) {
-        bail!("[log] keep must be >= 0");
     }
     Ok(())
 }
@@ -432,6 +487,78 @@ pub fn parse_size(s: &str) -> Result<u64> {
     match num.parse::<u64>() {
         Ok(n) if n > 0 => Ok(n << shift),
         _ => bail!("invalid size {s:?} (e.g. \"10MB\")"),
+    }
+}
+
+/// How `hum set` turns a command-line value into TOML.
+#[derive(Clone, Copy)]
+enum ValueKind {
+    Str,
+    Bool,
+    Int,
+    /// Comma-separated list of strings.
+    List,
+}
+
+/// Keys of a service config that `hum set` / `hum unset` accept, besides
+/// `env.<NAME>`. Kept next to `RawService` so the two change together.
+const EDIT_KEYS: [(&str, ValueKind); 7] = [
+    ("command", ValueKind::Str),
+    ("cwd", ValueKind::Str),
+    ("env_file", ValueKind::List),
+    ("autostart", ValueKind::Bool),
+    ("restart", ValueKind::Str),
+    ("log.max_size", ValueKind::Str),
+    ("log.keep", ValueKind::Int),
+];
+
+/// A service config key addressed from the command line.
+pub struct EditKey {
+    pub path: Vec<String>,
+    kind: ValueKind,
+}
+
+impl EditKey {
+    pub fn parse(key: &str) -> Result<Self> {
+        if let Some(var) = key.strip_prefix("env.") {
+            validate_env_key(var)?;
+            return Ok(EditKey {
+                path: vec!["env".into(), var.into()],
+                kind: ValueKind::Str,
+            });
+        }
+        match EDIT_KEYS.iter().find(|(k, _)| *k == key) {
+            Some((k, kind)) => Ok(EditKey {
+                path: k.split('.').map(String::from).collect(),
+                kind: *kind,
+            }),
+            None => bail!(
+                "unknown key {key:?} (known: {}, env.<NAME>)",
+                EDIT_KEYS.map(|(k, _)| k).join(", ")
+            ),
+        }
+    }
+
+    /// The TOML value for a command-line value of this key.
+    pub fn value(&self, raw: &str) -> Result<toml_edit::Value> {
+        let key = self.path.join(".");
+        Ok(match self.kind {
+            ValueKind::Str => raw.into(),
+            ValueKind::Bool => raw
+                .parse::<bool>()
+                .map_err(|_| anyhow::anyhow!("{key}: expected true or false, got {raw:?}"))?
+                .into(),
+            ValueKind::Int => raw
+                .parse::<i64>()
+                .map_err(|_| anyhow::anyhow!("{key}: expected an integer, got {raw:?}"))?
+                .into(),
+            ValueKind::List => raw
+                .split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .collect::<toml_edit::Array>()
+                .into(),
+        })
     }
 }
 
@@ -464,20 +591,26 @@ pub fn render_service(s: &Service) -> String {
 mod tests {
     use super::*;
 
+    fn n(name: &str) -> ServiceName {
+        ServiceName::parse(name).unwrap()
+    }
+
     #[test]
     fn defaults() {
-        let s = parse_service("t3", r#"command = ["t3", "server"]"#).unwrap();
+        let s = parse_service(&n("t3"), r#"command = ["t3", "server"]"#).unwrap();
         assert!(s.autostart);
         assert_eq!(s.restart, Restart::Always);
         assert_eq!(s.argv(), ["t3", "server"]);
     }
 
+    // Requirement: 字符串形式的 command
     #[test]
     fn shell_command() {
-        let s = parse_service("x", r#"command = "echo hi && sleep 1""#).unwrap();
+        let s = parse_service(&n("x"), r#"command = "echo hi && sleep 1""#).unwrap();
         assert_eq!(s.argv(), ["/bin/sh", "-c", "echo hi && sleep 1"]);
     }
 
+    // Requirement: 严格解析
     #[test]
     fn strict_parsing_rejects_invalid_files() {
         let cases = [
@@ -496,17 +629,18 @@ mod tests {
             ("unknown log field", "command = [\"a\"]\n[log]\nsize = 1"),
         ];
         for (what, src) in cases {
-            assert!(parse_service("x", src).is_err(), "{what}");
+            assert!(parse_service(&n("x"), src).is_err(), "{what}");
         }
     }
 
+    // Requirement: 文件名即服务名
     #[test]
     fn service_names_must_match_the_pattern() {
         for ok in ["t3", "api-server", "a_b", "0x"] {
-            assert!(validate_name(ok).is_ok(), "{ok}");
+            assert!(ServiceName::parse(ok).is_ok(), "{ok}");
         }
         for bad in ["", "_rotate", "-x", "A", "a.b", "a/b", "a b"] {
-            assert!(validate_name(bad).is_err(), "{bad:?}");
+            assert!(ServiceName::parse(bad).is_err(), "{bad:?}");
         }
     }
 
@@ -526,20 +660,62 @@ mod tests {
         }
     }
 
+    // Requirement: 服务配置覆盖全局日志设置
     #[test]
     fn service_log_settings_override_global() {
         assert_eq!(effective_log(&Global::default(), None), (10 << 20, 3));
-        let g = Global {
-            log: LogSettings {
-                max_size: Some("1MB".into()),
-                keep: Some(5),
-            },
-            ..Default::default()
-        };
-        let s = parse_service("x", "command = [\"a\"]\n[log]\nkeep = 1").unwrap();
+        let g = parse_global("[log]\nmax_size = \"1MB\"\nkeep = 5").unwrap();
+        let s = parse_service(&n("x"), "command = [\"a\"]\n[log]\nkeep = 1").unwrap();
         assert_eq!(effective_log(&g, Some(&s)), (1 << 20, 1));
     }
 
+    #[test]
+    fn default_size_text_matches_value() {
+        assert_eq!(
+            parse_size(DEFAULT_LOG_MAX_SIZE_TEXT).unwrap(),
+            DEFAULT_LOG_MAX_SIZE
+        );
+    }
+
+    // Requirement: 命令行修改字段
+    #[test]
+    fn every_edit_key_produces_a_valid_config() {
+        let samples = [
+            ("command", "echo hi"),
+            ("cwd", "/tmp"),
+            ("env_file", ".env, b.env"),
+            ("autostart", "false"),
+            ("restart", "never"),
+            ("log.max_size", "1MB"),
+            ("log.keep", "2"),
+            ("env.PORT", "1"),
+        ];
+        assert_eq!(samples.len(), EDIT_KEYS.len() + 1, "every key has a sample");
+        let mut doc = crate::tomledit::Doc::parse("command = [\"a\"]\n").unwrap();
+        for (key, raw) in samples {
+            let k = EditKey::parse(key).unwrap();
+            let path: Vec<&str> = k.path.iter().map(String::as_str).collect();
+            doc.set(&path, k.value(raw).unwrap()).unwrap();
+        }
+        let s = parse_service(&n("x"), &doc.to_string()).unwrap();
+        assert_eq!(s.command, Command::Shell("echo hi".into()));
+        assert_eq!(s.env_file, [".env", "b.env"]);
+        assert!(!s.autostart);
+        assert_eq!(s.restart, Restart::Never);
+        assert_eq!(
+            s.log,
+            LogSettings {
+                max_size: Some(1 << 20),
+                keep: Some(2)
+            }
+        );
+        assert_eq!(s.env["PORT"], "1");
+        assert!(EditKey::parse("port").is_err());
+        assert!(EditKey::parse("env.A-B").is_err());
+        assert!(EditKey::parse("autostart").unwrap().value("yes").is_err());
+    }
+
+    // Requirement: 路径展开
     #[test]
     fn path_expansion() {
         let home = Path::new("/Users/me");
@@ -550,8 +726,7 @@ mod tests {
             "~/work/t3"
         );
         assert_eq!(contract_path(Path::new("/opt/x"), home), "/opt/x");
-        let s = parse_service(
-            "x",
+        let s = parse_service(&n("x"),
             "command = [\"a\"]\ncwd = \"~/work/t3\"\nenv_file = [\".env\", \"/etc/x.env\", \"~/shared.env\"]",
         )
         .unwrap();
@@ -563,14 +738,14 @@ mod tests {
         .map(PathBuf::from)
         .into();
         assert_eq!(s.resolved_env_files(home), want);
-        let s = parse_service("x", "command = [\"a\"]").unwrap();
+        let s = parse_service(&n("x"), "command = [\"a\"]").unwrap();
         assert_eq!(s.resolved_cwd(home), home);
     }
 
     #[test]
     fn rendered_service_round_trips() {
         let s = Service {
-            name: "api".into(),
+            name: n("api"),
             command: Command::Argv(vec!["bun".into(), "run".into(), "start \"x\"".into()]),
             cwd: Some("~/work/api".into()),
             env_file: vec![".env".into()],
@@ -579,7 +754,7 @@ mod tests {
             env: BTreeMap::from([("PORT".into(), "4000".into()), ("B".into(), "a\\b".into())]),
             log: LogSettings::default(),
         };
-        let got = parse_service("api", &render_service(&s)).unwrap();
+        let got = parse_service(&n("api"), &render_service(&s)).unwrap();
         assert_eq!(got.command, s.command);
         assert_eq!(got.cwd, s.cwd);
         assert_eq!(got.env, s.env);
@@ -588,6 +763,7 @@ mod tests {
         assert_eq!(got.restart, Restart::OnFailure);
     }
 
+    // Requirement: 首次运行时创建
     #[test]
     fn global_is_created_once_with_path() {
         let dir = tempfile::tempdir().unwrap();

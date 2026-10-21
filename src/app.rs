@@ -1,5 +1,5 @@
-//! hum's operations on top of config, plist and launchd. The CLI layer only
-//! parses arguments and prints.
+//! hum's operations on top of config, plist and launchd. Operations return
+//! what happened; the CLI layer parses arguments and prints.
 
 use std::collections::{BTreeMap, HashSet};
 use std::fs;
@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use serde::Serialize;
 
-use crate::config::{self, Paths, ROTATE_NAME, Restart, Service, label};
+use crate::config::{self, Paths, ROTATE_NAME, Restart, Service, ServiceName, label};
 use crate::environ;
 use crate::launchd::{Manager, Status};
 use crate::{logfile, plist};
@@ -16,6 +16,9 @@ use crate::{logfile, plist};
 /// How often the rotate job checks log sizes, in seconds
 /// (pm2-logrotate's workerInterval default).
 pub const ROTATE_INTERVAL: u64 = 30;
+
+/// Arguments the rotate job passes to hum; a CLI test parses them.
+pub const ROTATE_ARGS: [&str; 4] = ["logs", "--rotate", "--all", "--if-oversize"];
 
 pub struct App {
     pub paths: Paths,
@@ -51,6 +54,21 @@ fn remove_if_exists(path: &Path) -> Result<()> {
     }
 }
 
+pub enum StartOutcome {
+    AlreadyRunning { pid: Option<u32> },
+    Started,
+}
+
+pub enum ChangeOutcome {
+    /// The running service was restarted.
+    Restarted,
+    /// launchd has the job loaded and keeps the old definition until the
+    /// service restarts.
+    NeedsRestart,
+    /// The job is not loaded; its plist holds the new definition.
+    Applied,
+}
+
 impl App {
     pub fn new() -> Result<Self> {
         Ok(App {
@@ -74,9 +92,13 @@ impl App {
 
     /// The plist a service should have.
     pub fn render_plist(&self, s: &Service) -> Vec<u8> {
+        self.render_plist_with(s, &self.hum_path)
+    }
+
+    fn render_plist_with(&self, s: &Service, hum_path: &str) -> Vec<u8> {
         plist::render(&plist::Job {
             label: label(&s.name),
-            program_arguments: vec![self.hum_path.clone(), "run".into(), s.name.clone()],
+            program_arguments: vec![hum_path.into(), "run".into(), s.name.to_string()],
             environment_variables: self.job_env(),
             run_at_load: s.autostart,
             keep_alive: match s.restart {
@@ -93,17 +115,11 @@ impl App {
     }
 
     fn render_rotate_plist(&self) -> Vec<u8> {
+        let mut args = vec![self.hum_path.clone()];
+        args.extend(ROTATE_ARGS.map(String::from));
         plist::render(&plist::Job {
             label: label(ROTATE_NAME),
-            program_arguments: [
-                self.hum_path.as_str(),
-                "logs",
-                "--rotate",
-                "--all",
-                "--if-oversize",
-            ]
-            .map(String::from)
-            .into(),
+            program_arguments: args,
             environment_variables: self.job_env(),
             start_interval: Some(ROTATE_INTERVAL),
             standard_out_path: self.log_path(ROTATE_NAME),
@@ -112,7 +128,7 @@ impl App {
         })
     }
 
-    /// Writes a plist if it differs; reports whether it changed.
+    /// Writes a plist file if it differs; reports whether it changed.
     fn write_plist(&self, name: &str, data: &[u8]) -> Result<bool> {
         let path = self.paths.plist_file(name);
         if fs::read(&path).is_ok_and(|cur| cur == data) {
@@ -123,78 +139,73 @@ impl App {
         Ok(true)
     }
 
-    /// Regenerates a service's plist file without touching launchd.
-    pub fn sync_plist(&self, s: &Service) -> Result<bool> {
-        self.write_plist(&s.name, &self.render_plist(s))
-    }
-
-    /// (plist exists, plist matches the config)
-    pub fn plist_current(&self, s: &Service) -> (bool, bool) {
-        match fs::read(self.paths.plist_file(&s.name)) {
-            Ok(cur) => (true, cur == self.render_plist(s)),
-            Err(_) => (false, false),
+    /// Writes a job's plist and makes launchd hold that definition.
+    ///
+    /// launchd keeps the definition it loaded and does not re-read the
+    /// file, so a loaded job whose plist changed (or that was loaded from
+    /// another path) is reloaded here, and kept running if it was. Every
+    /// write of a plist whose job may be loaded goes through here, which
+    /// keeps "loaded definition = plist on disk" true. Returns the status
+    /// afterwards.
+    fn install(&self, name: &str, data: &[u8]) -> Result<Status> {
+        let label = label(name);
+        let plist = self.paths.plist_file(name);
+        let st = self.ld.status(&label)?;
+        let changed = self.write_plist(name, data)?;
+        let foreign = st.path.as_deref().is_some_and(|p| Path::new(p) != plist);
+        if st.loaded && (changed || foreign) {
+            self.ld.bootout(&label)?;
+            self.ld.bootstrap(&plist)?;
+            if st.running {
+                self.ld.kickstart(&label)?;
+            }
         }
+        self.ld.status(&label)
     }
 
-    /// Enables the service, regenerates its plist and starts it. A running
-    /// service is left alone.
-    pub fn start(&self, name: &str) -> Result<()> {
+    /// Enables the service, brings its plist up to date and starts it. A
+    /// running service is left alone.
+    pub fn start(&self, name: &ServiceName) -> Result<StartOutcome> {
         let s = config::load_service(&self.paths, name)?;
         let label = label(name);
         let st = self.ld.status(&label)?;
         if st.running {
-            println!(
-                "{name}: already running (pid {})",
-                st.pid.unwrap_or_default()
-            );
-            return Ok(());
+            return Ok(StartOutcome::AlreadyRunning { pid: st.pid });
         }
-        let changed = self.sync_plist(&s)?;
+        let st = self.install(name, &self.render_plist(&s))?;
         self.ld.enable(&label)?;
-        let plist = self.paths.plist_file(name);
-        let mut loaded = st.loaded;
-        if loaded && (changed || st.path.as_deref() != Some(&*plist.to_string_lossy())) {
-            // Loaded with an outdated definition: reload it.
-            self.ld.bootout(&label)?;
-            loaded = false;
-        }
-        if !loaded {
-            self.ld.bootstrap(&plist)?;
+        if !st.loaded {
+            self.ld.bootstrap(&self.paths.plist_file(name))?;
         }
         // bootstrap only runs the job when RunAtLoad is set.
         self.ld.kickstart(&label)?;
-        println!("{name}: started");
-        self.ensure_rotate_job()
+        self.ensure_rotate_job()?;
+        Ok(StartOutcome::Started)
     }
 
     /// Unloads the service and disables it so it stays stopped after login.
-    pub fn stop(&self, name: &str) -> Result<()> {
-        config::validate_name(name)?;
+    pub fn stop(&self, name: &ServiceName) -> Result<()> {
         let label = label(name);
         self.ld.bootout(&label)?;
-        self.ld.disable(&label)?;
-        println!("{name}: stopped");
-        Ok(())
+        self.ld.disable(&label)
     }
 
     /// Regenerates the plist and reloads the job. A stopped (disabled)
     /// service is enabled and started.
-    pub fn restart(&self, name: &str) -> Result<()> {
+    pub fn restart(&self, name: &ServiceName) -> Result<()> {
         let s = config::load_service(&self.paths, name)?;
         let label = label(name);
-        self.sync_plist(&s)?;
         self.ld.bootout(&label)?;
+        self.write_plist(name, &self.render_plist(&s))?;
         self.ld.enable(&label)?;
         self.ld.bootstrap(&self.paths.plist_file(name))?;
         self.ld.kickstart(&label)?;
-        println!("{name}: restarted");
         self.ensure_rotate_job()
     }
 
     /// Unloads the service, deletes its plist and, unless `keep_config`,
     /// its config file.
-    pub fn remove(&self, name: &str, keep_config: bool) -> Result<()> {
-        config::validate_name(name)?;
+    pub fn remove(&self, name: &ServiceName, keep_config: bool) -> Result<()> {
         let (cfg, plist) = (self.paths.service_file(name), self.paths.plist_file(name));
         if !cfg.exists() && !plist.exists() {
             bail!("service {name:?} not found");
@@ -205,56 +216,80 @@ impl App {
         // does not inherit it.
         self.ld.enable(&label)?;
         remove_if_exists(&plist)?;
-        if keep_config {
-            println!("{name}: unregistered (config kept at {})", cfg.display());
-        } else {
+        if !keep_config {
             remove_if_exists(&cfg)?;
-            println!("{name}: removed");
         }
         self.prune_rotate_job()
     }
 
-    /// Makes a config edit take effect: the plist is regenerated, and a
-    /// running service is restarted when `restart` is set.
-    pub fn apply_config_change(&self, name: &str, restart: bool) -> Result<()> {
+    /// Makes a config edit take effect.
+    ///
+    /// A loaded job's plist is left as it is unless the job is restarted:
+    /// reloading it would also start it when `autostart` is set, and
+    /// leaving the old file keeps `hum ls` reporting the pending change.
+    /// A job that is not loaded just gets its plist rewritten.
+    pub fn apply_config_change(&self, name: &ServiceName, restart: bool) -> Result<ChangeOutcome> {
         let s = config::load_service(&self.paths, name)?;
-        if !self.ld.status(&label(name))?.running {
-            // Keep the file current for the next login; launchd re-reads it
-            // on start/restart.
-            if self.paths.plist_file(name).exists() {
-                self.sync_plist(&s)?;
-            }
-            return Ok(());
+        let st = self.ld.status(&label(name))?;
+        if st.running && restart {
+            self.restart(name)?;
+            return Ok(ChangeOutcome::Restarted);
         }
-        if !restart {
-            println!("{name}: running; run `hum restart {name}` to apply");
-            return Ok(());
+        if st.loaded {
+            return Ok(ChangeOutcome::NeedsRestart);
         }
-        self.restart(name)
+        if self.paths.plist_file(name).exists() {
+            self.write_plist(name, &self.render_plist(&s))?;
+        }
+        Ok(ChangeOutcome::Applied)
+    }
+
+    /// Writes the plist of a service that is not registered yet; launchd
+    /// is not touched.
+    pub fn write_new_plist(&self, s: &Service) -> Result<()> {
+        self.write_plist(&s.name, &self.render_plist(s)).map(drop)
     }
 
     /// Installs and loads the periodic rotate job.
     pub fn ensure_rotate_job(&self) -> Result<()> {
-        let label = label(ROTATE_NAME);
-        let changed = self.write_plist(ROTATE_NAME, &self.render_rotate_plist())?;
-        let st = self.ld.status(&label)?;
-        if st.loaded && !changed {
-            return Ok(());
+        let st = self.install(ROTATE_NAME, &self.render_rotate_plist())?;
+        if !st.loaded {
+            self.ld.enable(&label(ROTATE_NAME))?;
+            self.ld.bootstrap(&self.paths.plist_file(ROTATE_NAME))?;
         }
-        if st.loaded {
-            self.ld.bootout(&label)?;
-        }
-        self.ld.enable(&label)?;
-        self.ld.bootstrap(&self.paths.plist_file(ROTATE_NAME))
+        Ok(())
     }
 
     /// Removes the rotate job once no service is left.
     fn prune_rotate_job(&self) -> Result<()> {
-        if !self.paths.service_names()?.is_empty() {
+        if !self.paths.service_files()?.is_empty() {
             return Ok(());
         }
         self.ld.bootout(&label(ROTATE_NAME))?;
         remove_if_exists(&self.paths.plist_file(ROTATE_NAME))
+    }
+
+    /// Why launchd does not match the service's config, if it does not.
+    pub fn sync_reason(&self, s: &Service, st: &Status) -> Option<String> {
+        let plist_path = self.paths.plist_file(&s.name);
+        let Ok(data) = fs::read(&plist_path) else {
+            return Some("plist missing".into());
+        };
+        if data != self.render_plist(s) {
+            // Name the hum path when it is the only difference: running a
+            // different hum binary (a dev build) makes every plist differ.
+            if let Some(prog) = plist::program(&data)
+                && prog != self.hum_path
+                && data == self.render_plist_with(s, &prog)
+            {
+                return Some(format!("plist runs {prog}, this hum is {}", self.hum_path));
+            }
+            return Some("plist outdated".into());
+        }
+        match &st.path {
+            Some(p) if st.loaded && Path::new(p) != plist_path => Some(format!("loaded from {p}")),
+            _ => None,
+        }
     }
 }
 
@@ -292,93 +327,211 @@ impl State {
     }
 }
 
+/// What launchd reports about a service, as `hum ls` / `show` present it.
+#[derive(Serialize, Debug)]
+pub struct LaunchdState {
+    pub state: State,
+    pub pid: Option<u32>,
+    pub last_exit: Option<i32>,
+    pub last_signal: Option<String>,
+}
+
+/// The config side of a `hum ls` row.
+#[derive(Serialize, Debug)]
+#[serde(tag = "config", rename_all = "lowercase")]
+pub enum ConfigState {
+    Ok {
+        command: String,
+        /// Set when launchd does not match the config.
+        out_of_sync: Option<String>,
+    },
+    Invalid {
+        error: String,
+    },
+    /// A hum plist with no config file.
+    Missing,
+}
+
 /// One row of `hum ls`.
 #[derive(Serialize, Debug)]
 pub struct ServiceState {
     pub name: String,
-    pub state: Option<State>,
-    pub pid: Option<u32>,
-    pub last_exit: Option<i32>,
-    pub last_signal: Option<String>,
-    pub command: Option<String>,
-    /// Set when launchd does not match the config directory.
-    pub out_of_sync: Option<String>,
-    pub error: Option<String>,
+    /// None when the file name is not a valid service name.
+    #[serde(flatten)]
+    pub launchd: Option<LaunchdState>,
+    #[serde(flatten)]
+    pub config: ConfigState,
 }
 
-pub const NO_CONFIG: &str = "plist without config";
+impl ServiceState {
+    pub fn out_of_sync(&self) -> bool {
+        matches!(
+            self.config,
+            ConfigState::Missing
+                | ConfigState::Ok {
+                    out_of_sync: Some(_),
+                    ..
+                }
+        )
+    }
+}
 
 impl App {
+    fn launchd_state(
+        &self,
+        name: &ServiceName,
+        disabled: &HashSet<String>,
+    ) -> Result<(Status, LaunchdState)> {
+        let label = label(name);
+        let st = self.ld.status(&label)?;
+        let ls = LaunchdState {
+            state: State::of(&st, disabled.contains(&label)),
+            pid: st.pid,
+            last_exit: st.last_exit,
+            last_signal: st.last_signal.clone(),
+        };
+        Ok((st, ls))
+    }
+
     pub fn states(&self) -> Result<Vec<ServiceState>> {
         let disabled = self.ld.disabled()?;
         let mut rows = vec![];
-        let cfg_names = self.paths.service_names()?;
-        for name in &cfg_names {
-            let mut row = ServiceState {
-                name: name.clone(),
-                state: None,
-                pid: None,
-                last_exit: None,
-                last_signal: None,
-                command: None,
-                out_of_sync: None,
-                error: None,
-            };
-            if let Err(e) = config::validate_name(name) {
-                row.error = Some(e.to_string());
-                rows.push(row);
-                continue;
-            }
-            let st = self.fill_status(&mut row, &disabled)?;
-            match config::load_service(&self.paths, name) {
-                Ok(s) => {
-                    row.command = Some(s.command_string());
-                    row.out_of_sync = self.sync_reason(&s, &st);
+        let mut configured = vec![];
+        for file in self.paths.service_files()? {
+            let name = match file {
+                Ok(name) => name,
+                Err(raw) => {
+                    rows.push(ServiceState {
+                        name: raw.clone(),
+                        launchd: None,
+                        config: ConfigState::Invalid {
+                            error: format!("invalid service name {raw:?}"),
+                        },
+                    });
+                    continue;
                 }
-                Err(e) => row.error = Some(format!("{e:#}")),
-            }
-            rows.push(row);
+            };
+            let (st, launchd) = self.launchd_state(&name, &disabled)?;
+            let config = match config::load_service(&self.paths, &name) {
+                Ok(s) => ConfigState::Ok {
+                    command: s.command_string(),
+                    out_of_sync: self.sync_reason(&s, &st),
+                },
+                Err(e) => ConfigState::Invalid {
+                    error: format!("{e:#}"),
+                },
+            };
+            rows.push(ServiceState {
+                name: name.to_string(),
+                launchd: Some(launchd),
+                config,
+            });
+            configured.push(name);
         }
         for name in self.paths.plist_names()? {
-            if cfg_names.contains(&name) {
+            if configured.contains(&name) {
                 continue;
             }
-            let mut row = ServiceState {
-                name,
-                state: None,
-                pid: None,
-                last_exit: None,
-                last_signal: None,
-                command: None,
-                out_of_sync: Some(NO_CONFIG.into()),
-                error: None,
-            };
-            self.fill_status(&mut row, &disabled)?;
-            rows.push(row);
+            let (_, launchd) = self.launchd_state(&name, &disabled)?;
+            rows.push(ServiceState {
+                name: name.to_string(),
+                launchd: Some(launchd),
+                config: ConfigState::Missing,
+            });
         }
         Ok(rows)
     }
+}
 
-    fn fill_status(&self, row: &mut ServiceState, disabled: &HashSet<String>) -> Result<Status> {
-        let label = label(&row.name);
-        let st = self.ld.status(&label)?;
-        row.state = Some(State::of(&st, disabled.contains(&label)));
-        row.pid = st.pid;
-        row.last_exit = st.last_exit;
-        row.last_signal = st.last_signal.clone();
-        Ok(st)
-    }
+// --- show ---
 
-    pub fn sync_reason(&self, s: &Service, st: &Status) -> Option<String> {
-        let plist = self.paths.plist_file(&s.name);
-        match self.plist_current(s) {
-            (false, _) => Some("plist missing".into()),
-            (true, false) => Some("plist outdated".into()),
-            _ => match &st.path {
-                Some(p) if st.loaded && Path::new(p) != plist => Some(format!("loaded from {p}")),
-                _ => None,
-            },
-        }
+#[derive(Serialize, Debug)]
+pub struct EnvVar {
+    pub key: String,
+    /// Masked unless revealed.
+    pub value: String,
+    pub source: String,
+}
+
+#[derive(Serialize, Debug)]
+pub struct UndefinedRef {
+    pub file: String,
+    pub line: usize,
+    pub name: String,
+}
+
+/// Everything `hum show` reports; the text and JSON outputs both render it.
+#[derive(Serialize, Debug)]
+pub struct Report {
+    pub name: ServiceName,
+    pub label: String,
+    pub config: PathBuf,
+    pub plist: PathBuf,
+    pub log: PathBuf,
+    pub command: Vec<String>,
+    pub shell: bool,
+    #[serde(skip)]
+    pub command_display: String,
+    pub cwd: PathBuf,
+    pub env_file: Vec<PathBuf>,
+    pub autostart: bool,
+    pub restart: Restart,
+    pub log_max_size: u64,
+    pub log_keep: u64,
+    #[serde(flatten)]
+    pub launchd: LaunchdState,
+    pub out_of_sync: Option<String>,
+    pub env: Vec<EnvVar>,
+    pub env_error: Option<String>,
+    pub undefined_refs: Vec<UndefinedRef>,
+}
+
+pub const MASK: &str = "********";
+
+impl App {
+    pub fn show(&self, name: &ServiceName, reveal: bool) -> Result<Report> {
+        let s = config::load_service(&self.paths, name)?;
+        let global = config::load_global(&self.paths)?;
+        let (st, launchd) = self.launchd_state(name, &self.ld.disabled()?)?;
+        let (log_max_size, log_keep) = config::effective_log(&global, Some(&s));
+        let (env, env_err) = environ::assemble(&environ::base(), &global, &s, &self.paths.home);
+        Ok(Report {
+            name: name.clone(),
+            label: label(name),
+            config: self.paths.service_file(name),
+            plist: self.paths.plist_file(name),
+            log: self.paths.log_file(name),
+            command: s.argv(),
+            shell: matches!(s.command, config::Command::Shell(_)),
+            command_display: s.command_string(),
+            cwd: s.resolved_cwd(&self.paths.home),
+            env_file: s.resolved_env_files(&self.paths.home),
+            autostart: s.autostart,
+            restart: s.restart,
+            log_max_size,
+            log_keep,
+            launchd,
+            out_of_sync: self.sync_reason(&s, &st),
+            env: env
+                .vars
+                .iter()
+                .map(|(k, v)| EnvVar {
+                    key: k.clone(),
+                    value: if reveal { v.clone() } else { MASK.into() },
+                    source: env.sources[k].clone(),
+                })
+                .collect(),
+            env_error: env_err.map(|e| e.to_string()),
+            undefined_refs: env
+                .undefined
+                .into_iter()
+                .map(|u| UndefinedRef {
+                    file: u.file,
+                    line: u.line,
+                    name: u.name,
+                })
+                .collect(),
+        })
     }
 }
 
@@ -404,7 +557,9 @@ impl ActionKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Action {
     pub kind: ActionKind,
-    pub name: String,
+    pub name: ServiceName,
+    /// Why the action is needed.
+    pub reason: String,
 }
 
 impl App {
@@ -412,68 +567,70 @@ impl App {
     pub fn plan(&self) -> Result<(Vec<Action>, Vec<anyhow::Error>)> {
         let mut actions = vec![];
         let mut problems = vec![];
-        let cfg_names = self.paths.service_names()?;
-        for name in &cfg_names {
-            let s = match config::load_service(&self.paths, name) {
+        let mut configured = vec![];
+        for file in self.paths.service_files()? {
+            let name = match file {
+                Ok(name) => name,
+                Err(raw) => {
+                    problems.push(anyhow::anyhow!("invalid service name {raw:?}"));
+                    continue;
+                }
+            };
+            configured.push(name.clone());
+            let s = match config::load_service(&self.paths, &name) {
                 Ok(s) => s,
                 Err(e) => {
                     problems.push(e);
                     continue;
                 }
             };
-            let kind = match self.plist_current(&s) {
-                (false, _) => ActionKind::Register,
-                (true, false) => ActionKind::Update,
-                _ => continue,
+            let st = self.ld.status(&label(&name))?;
+            let Some(reason) = self.sync_reason(&s, &st) else {
+                continue;
             };
-            actions.push(Action {
-                kind,
-                name: name.clone(),
-            });
+            let kind = if self.paths.plist_file(&name).exists() {
+                ActionKind::Update
+            } else {
+                ActionKind::Register
+            };
+            actions.push(Action { kind, name, reason });
         }
         for name in self.paths.plist_names()? {
-            if !cfg_names.contains(&name) {
+            if !configured.contains(&name) {
                 actions.push(Action {
                     kind: ActionKind::Unregister,
                     name,
+                    reason: "plist without config".into(),
                 });
             }
         }
         Ok((actions, problems))
     }
 
-    /// Aligns launchd with the config directory.
-    pub fn apply(&self, actions: &[Action]) -> Result<()> {
-        for act in actions {
-            let label = label(&act.name);
-            let plist = self.paths.plist_file(&act.name);
-            match act.kind {
-                ActionKind::Register => {
-                    self.sync_plist(&config::load_service(&self.paths, &act.name)?)?;
+    /// Carries out one planned action.
+    pub fn apply_action(&self, act: &Action) -> Result<()> {
+        let label = label(&act.name);
+        match act.kind {
+            ActionKind::Register | ActionKind::Update => {
+                let s = config::load_service(&self.paths, &act.name)?;
+                let st = self.install(&act.name, &self.render_plist(&s))?;
+                if act.kind == ActionKind::Register && !st.loaded {
                     self.ld.enable(&label)?;
-                    self.ld.bootstrap(&plist)?;
+                    self.ld.bootstrap(&self.paths.plist_file(&act.name))?;
                 }
-                ActionKind::Update => {
-                    let s = config::load_service(&self.paths, &act.name)?;
-                    let st = self.ld.status(&label)?;
-                    self.sync_plist(&s)?;
-                    if st.loaded {
-                        self.ld.bootout(&label)?;
-                        self.ld.bootstrap(&plist)?;
-                        if st.running {
-                            self.ld.kickstart(&label)?;
-                        }
-                    }
-                }
-                ActionKind::Unregister => {
-                    self.ld.bootout(&label)?;
-                    self.ld.enable(&label)?;
-                    remove_if_exists(&plist)?;
-                }
+                Ok(())
             }
-            println!("{}: {}", act.name, act.kind.as_str());
+            ActionKind::Unregister => {
+                self.ld.bootout(&label)?;
+                self.ld.enable(&label)?;
+                remove_if_exists(&self.paths.plist_file(&act.name))
+            }
         }
-        if self.paths.service_names()?.is_empty() {
+    }
+
+    /// Installs or removes the rotate job after `apply`.
+    pub fn finish_apply(&self) -> Result<()> {
+        if self.paths.service_files()?.is_empty() {
             self.prune_rotate_job()
         } else {
             self.ensure_rotate_job()
@@ -556,12 +713,23 @@ impl App {
         };
         let global_path = global.env.get("PATH").cloned().unwrap_or_default();
 
-        let names = self.paths.service_names()?;
-        for name in &names {
-            let s = match config::load_service(&self.paths, name) {
+        let mut configured = vec![];
+        for file in self.paths.service_files()? {
+            let name = match file {
+                Ok(name) => name,
+                Err(raw) => {
+                    add(
+                        &raw,
+                        (Severity::Error, format!("invalid service name {raw:?}")),
+                    );
+                    continue;
+                }
+            };
+            configured.push(name.clone());
+            let s = match config::load_service(&self.paths, &name) {
                 Ok(s) => s,
                 Err(e) => {
-                    add(name, (Severity::Error, format!("{e:#}")));
+                    add(&name, (Severity::Error, format!("{e:#}")));
                     continue;
                 }
             };
@@ -592,15 +760,15 @@ impl App {
                     ));
                 }
             }
-            if let Some(reason) = self.sync_reason(&s, &self.ld.status(&label(name))?) {
+            if let Some(reason) = self.sync_reason(&s, &self.ld.status(&label(&name))?) {
                 problems.push((
                     Severity::Warn,
                     format!("launchd out of sync ({reason}); run `hum apply`"),
                 ));
             }
-            problems.extend(check_program(&self.paths.plist_file(name)));
+            problems.extend(check_program(&self.paths.plist_file(&name)));
             let (max_size, _) = config::effective_log(&global, Some(&s));
-            if let Ok(m) = fs::metadata(self.paths.log_file(name))
+            if let Ok(m) = fs::metadata(self.paths.log_file(&name))
                 && m.len() > OVERSIZE_FACTOR * max_size
             {
                 problems.push((
@@ -615,11 +783,11 @@ impl App {
                 problems.push((Severity::Ok, "ok".into()));
             }
             for p in problems {
-                add(name, p);
+                add(&name, p);
             }
         }
         for name in self.paths.plist_names()? {
-            if !names.contains(&name) {
+            if !configured.contains(&name) {
                 add(
                     &name,
                     (
@@ -629,7 +797,7 @@ impl App {
                 );
             }
         }
-        if !names.is_empty() {
+        if !configured.is_empty() {
             let rp = self.paths.plist_file(ROTATE_NAME);
             if !rp.exists() {
                 add(
@@ -656,32 +824,31 @@ pub struct Exec {
     pub argv: Vec<String>,
     pub env: BTreeMap<String, String>,
     pub dir: PathBuf,
+    /// Problems that do not stop the service from starting.
+    pub warnings: Vec<String>,
 }
 
 impl App {
     /// Loads the service, rotates its log if oversized and assembles the
     /// environment from scratch.
-    pub fn prepare_run(&self, name: &str, base: &BTreeMap<String, String>) -> Result<Exec> {
+    pub fn prepare_run(&self, name: &ServiceName, base: &BTreeMap<String, String>) -> Result<Exec> {
         let s = config::load_service(&self.paths, name)?;
         let global = config::load_global(&self.paths)?;
+        let mut warnings = vec![];
         let (max_size, keep) = config::effective_log(&global, Some(&s));
-        if let Err(e) = logfile::rotate_if_needed(
-            &self.paths.log_file(name),
-            max_size,
-            keep,
-            chrono::Local::now(),
-        ) {
-            eprintln!("warning: log rotation: {e}");
+        let now = chrono::Local::now();
+        if let Err(e) = logfile::rotate_if_needed(&self.paths.log_file(name), max_size, keep, now) {
+            warnings.push(format!("log rotation: {e}"));
         }
         let (env, err) = environ::assemble(base, &global, &s, &self.paths.home);
         if let Some(e) = err {
             return Err(anyhow::Error::new(e).context(format!("{name}: not starting")));
         }
         for u in &env.undefined {
-            eprintln!(
-                "warning: {}:{}: ${{{}}} is undefined, expanded to \"\"",
+            warnings.push(format!(
+                "{}:{}: ${{{}}} is undefined, expanded to \"\"",
                 u.file, u.line, u.name
-            );
+            ));
         }
         let argv = s.argv();
         let path = env.vars.get("PATH").map(String::as_str).unwrap_or("");
@@ -692,6 +859,7 @@ impl App {
             argv,
             env: env.vars,
             dir: s.resolved_cwd(&self.paths.home),
+            warnings,
         })
     }
 }
@@ -702,10 +870,13 @@ mod tests {
     use crate::environ::EnvFileError;
     use std::cell::RefCell;
 
-    /// Models the parts of launchd hum relies on.
+    /// Models the parts of launchd hum relies on, including that a loaded
+    /// job keeps the definition it was loaded with.
     #[derive(Default)]
     struct FakeLd {
         jobs: RefCell<BTreeMap<String, Status>>,
+        /// The plist bytes each loaded job was loaded from.
+        loaded_defs: RefCell<BTreeMap<String, Vec<u8>>>,
         disabled: RefCell<HashSet<String>>,
         calls: RefCell<Vec<String>>,
     }
@@ -732,8 +903,9 @@ mod tests {
             if self.jobs.borrow().contains_key(&label) {
                 bail!("already loaded");
             }
-            let data = String::from_utf8(fs::read(plist)?)?;
-            let run_at_load = data.contains("<key>RunAtLoad</key>\n\t<true/>");
+            let data = fs::read(plist)?;
+            let run_at_load =
+                String::from_utf8_lossy(&data).contains("<key>RunAtLoad</key>\n\t<true/>");
             let st = Status {
                 loaded: true,
                 running: run_at_load,
@@ -741,13 +913,15 @@ mod tests {
                 path: Some(plist.display().to_string()),
                 ..Default::default()
             };
-            self.jobs.borrow_mut().insert(label, st);
+            self.jobs.borrow_mut().insert(label.clone(), st);
+            self.loaded_defs.borrow_mut().insert(label, data);
             Ok(())
         }
         fn bootout(&self, label: &str) -> Result<()> {
             if self.jobs.borrow_mut().remove(label).is_some() {
                 self.log(format!("bootout {label}"));
             }
+            self.loaded_defs.borrow_mut().remove(label);
             Ok(())
         }
         fn enable(&self, label: &str) -> Result<()> {
@@ -792,6 +966,10 @@ mod tests {
         }
     }
 
+    fn n(name: &str) -> ServiceName {
+        ServiceName::parse(name).unwrap()
+    }
+
     impl Fixture {
         fn write(&self, name: &str, body: &str) {
             config::write_atomic(&self.app.paths.service_file(name), body.as_bytes()).unwrap();
@@ -802,6 +980,15 @@ mod tests {
         fn take_calls(&self) -> Vec<String> {
             std::mem::take(&mut *self.ld.calls.borrow_mut())
         }
+        /// Whether launchd holds the definition currently on disk.
+        fn loaded_def_current(&self, name: &str) -> bool {
+            let on_disk = fs::read(self.app.paths.plist_file(name)).unwrap();
+            self.ld.loaded_defs.borrow().get(&label(name)) == Some(&on_disk)
+        }
+        fn row(&self, name: &str) -> ServiceState {
+            let rows = self.app.states().unwrap();
+            rows.into_iter().find(|r| r.name == name).unwrap()
+        }
     }
 
     // Requirement: start, stop, restart, rm
@@ -810,27 +997,27 @@ mod tests {
         let f = fixture();
         let a = &f.app;
         f.write("t3", r#"command = ["sleep", "1000"]"#);
-        a.start("t3").unwrap();
+        assert!(matches!(a.start(&n("t3")).unwrap(), StartOutcome::Started));
         assert!(f.status("t3").running);
         assert!(a.paths.plist_file("t3").exists());
-        assert!(a.paths.plist_file(ROTATE_NAME).exists());
         assert!(f.status(ROTATE_NAME).loaded);
 
         f.take_calls();
-        a.start("t3").unwrap();
+        let again = a.start(&n("t3")).unwrap();
+        assert!(matches!(again, StartOutcome::AlreadyRunning { .. }));
         assert!(
             f.take_calls().is_empty(),
             "start on a running service is a no-op"
         );
 
-        a.stop("t3").unwrap();
-        assert_eq!(a.states().unwrap()[0].state, Some(State::Disabled));
+        a.stop(&n("t3")).unwrap();
+        assert_eq!(f.row("t3").launchd.unwrap().state, State::Disabled);
 
-        a.restart("t3").unwrap();
+        a.restart(&n("t3")).unwrap();
         assert!(f.status("t3").running);
         assert!(!f.ld.disabled.borrow().contains("hum.t3"));
 
-        a.remove("t3", false).unwrap();
+        a.remove(&n("t3"), false).unwrap();
         for p in [
             a.paths.plist_file("t3"),
             a.paths.service_file("t3"),
@@ -841,30 +1028,96 @@ mod tests {
         assert!(!f.status("t3").loaded && !f.status(ROTATE_NAME).loaded);
     }
 
+    // Requirement: start
     #[test]
     fn start_runs_services_without_autostart() {
         let f = fixture();
         f.write("x", "command = [\"sleep\", \"1\"]\nautostart = false\n");
-        f.app.start("x").unwrap();
+        f.app.start(&n("x")).unwrap();
         assert!(f.status("x").running);
     }
 
+    // Requirement: start
     #[test]
     fn start_reloads_an_outdated_loaded_job() {
         let f = fixture();
         f.write("x", "command = [\"sleep\", \"1\"]\nautostart = false\n");
-        f.app.start("x").unwrap();
+        f.app.start(&n("x")).unwrap();
         f.ld.jobs.borrow_mut().get_mut("hum.x").unwrap().running = false;
         f.write(
             "x",
             "command = [\"sleep\", \"1\"]\nautostart = false\nrestart = \"never\"\n",
         );
         f.take_calls();
-        f.app.start("x").unwrap();
+        f.app.start(&n("x")).unwrap();
         assert_eq!(
             f.take_calls(),
             ["bootout hum.x", "bootstrap hum.x", "kickstart hum.x"]
         );
+        assert!(f.loaded_def_current("x"));
+    }
+
+    // Requirement: 服务配置改动的生效
+    #[test]
+    fn config_change_on_a_loaded_stopped_job() {
+        // A crashed job stays loaded. Its config change must not start it,
+        // must stay visible as pending, and must reach launchd on start.
+        let f = fixture();
+        f.write("x", r#"command = ["sleep", "1"]"#);
+        f.app.start(&n("x")).unwrap();
+        f.ld.jobs.borrow_mut().get_mut("hum.x").unwrap().running = false;
+        f.write("x", "command = [\"sleep\", \"1\"]\nrestart = \"never\"\n");
+        f.take_calls();
+        let outcome = f.app.apply_config_change(&n("x"), true).unwrap();
+        assert!(matches!(outcome, ChangeOutcome::NeedsRestart));
+        assert!(f.take_calls().is_empty() && !f.status("x").running);
+        assert!(f.row("x").out_of_sync(), "ls flags the pending change");
+        f.app.start(&n("x")).unwrap();
+        assert_eq!(f.take_calls()[..2], ["bootout hum.x", "bootstrap hum.x"]);
+        assert!(f.status("x").running);
+        assert!(f.loaded_def_current("x"));
+        assert!(!f.row("x").out_of_sync());
+    }
+
+    // Requirement: 服务配置改动的生效
+    #[test]
+    fn config_change_on_an_unloaded_job_rewrites_its_plist() {
+        let f = fixture();
+        f.write("x", r#"command = ["sleep", "1"]"#);
+        f.app.start(&n("x")).unwrap();
+        f.app.stop(&n("x")).unwrap();
+        f.write("x", "command = [\"sleep\", \"1\"]\nautostart = false\n");
+        let outcome = f.app.apply_config_change(&n("x"), true).unwrap();
+        assert!(matches!(outcome, ChangeOutcome::Applied));
+        assert!(!f.status("x").loaded);
+        assert!(
+            !f.row("x").out_of_sync(),
+            "the next login loads the new plist"
+        );
+    }
+
+    // Requirement: 服务配置改动的生效, 标出与 launchd 不一致
+    #[test]
+    fn config_change_on_a_running_job() {
+        let f = fixture();
+        f.write("x", r#"command = ["sleep", "1"]"#);
+        f.app.start(&n("x")).unwrap();
+        f.write("x", "command = [\"sleep\", \"1\"]\nautostart = false\n");
+        f.take_calls();
+        let outcome = f.app.apply_config_change(&n("x"), false).unwrap();
+        assert!(matches!(outcome, ChangeOutcome::NeedsRestart));
+        assert!(
+            f.take_calls().is_empty(),
+            "--no-restart leaves launchd alone"
+        );
+        assert!(
+            f.row("x").out_of_sync(),
+            "ls keeps flagging the pending change"
+        );
+        let outcome = f.app.apply_config_change(&n("x"), true).unwrap();
+        assert!(matches!(outcome, ChangeOutcome::Restarted));
+        assert!(f.loaded_def_current("x") && f.status("x").running);
+        assert!(!f.row("x").out_of_sync());
     }
 
     // Requirement: 标出与 launchd 不一致, apply 对齐, apply 跳过无效配置
@@ -875,35 +1128,37 @@ mod tests {
         f.write("new1", r#"command = ["sleep", "1"]"#);
         f.write("changed", r#"command = ["sleep", "1"]"#);
         f.write("broken", "command = 3");
-        a.start("changed").unwrap();
+        f.write("Bad", r#"command = ["x"]"#);
+        a.start(&n("changed")).unwrap();
         f.write(
             "changed",
             "command = [\"sleep\", \"2\"]\nrestart = \"on-failure\"\n",
         );
         fs::write(a.paths.plist_file("orphan"), "<plist/>").unwrap();
-        f.ld.jobs.borrow_mut().insert(
-            "hum.orphan".into(),
-            Status {
-                loaded: true,
-                running: true,
-                pid: Some(9),
-                ..Default::default()
-            },
-        );
+        let orphan = Status {
+            loaded: true,
+            running: true,
+            pid: Some(9),
+            ..Default::default()
+        };
+        f.ld.jobs.borrow_mut().insert("hum.orphan".into(), orphan);
 
-        let rows = a.states().unwrap();
-        let row = |n: &str| rows.iter().find(|r| r.name == n).unwrap();
-        assert_eq!(row("new1").out_of_sync.as_deref(), Some("plist missing"));
-        assert_eq!(
-            row("changed").out_of_sync.as_deref(),
-            Some("plist outdated")
-        );
-        assert_eq!(row("changed").state, Some(State::Running));
-        assert!(row("broken").error.is_some());
-        assert_eq!(row("orphan").out_of_sync.as_deref(), Some(NO_CONFIG));
+        let reason = |name: &str| match f.row(name).config {
+            ConfigState::Ok { out_of_sync, .. } => out_of_sync,
+            other => panic!("{name}: {other:?}"),
+        };
+        assert_eq!(reason("new1").as_deref(), Some("plist missing"));
+        assert_eq!(reason("changed").as_deref(), Some("plist outdated"));
+        assert_eq!(f.row("changed").launchd.unwrap().state, State::Running);
+        assert!(matches!(
+            f.row("broken").config,
+            ConfigState::Invalid { .. }
+        ));
+        assert!(matches!(f.row("Bad").config, ConfigState::Invalid { .. }));
+        assert!(matches!(f.row("orphan").config, ConfigState::Missing));
 
         let (actions, problems) = a.plan().unwrap();
-        assert_eq!(problems.len(), 1);
+        assert_eq!(problems.len(), 2);
         let summary: Vec<_> = actions
             .iter()
             .map(|x| format!("{} {}", x.kind.as_str(), x.name))
@@ -912,11 +1167,15 @@ mod tests {
             summary,
             ["update changed", "register new1", "unregister orphan"]
         );
-        a.apply(&actions).unwrap();
+        for act in &actions {
+            a.apply_action(act).unwrap();
+        }
+        a.finish_apply().unwrap();
         assert!(
             f.status("changed").running,
             "running service keeps running after reload"
         );
+        assert!(f.loaded_def_current("changed"));
         assert!(
             f.status("new1").running,
             "registered and started (autostart)"
@@ -926,24 +1185,46 @@ mod tests {
         assert!(a.plan().unwrap().0.is_empty());
     }
 
-    // Requirement: 服务配置改动的生效
+    // Requirement: 标出与 launchd 不一致
     #[test]
-    fn config_change_restarts_only_when_asked() {
+    fn a_different_hum_binary_is_named_as_the_reason() {
         let f = fixture();
         f.write("x", r#"command = ["sleep", "1"]"#);
-        f.app.start("x").unwrap();
-        f.write("x", "command = [\"sleep\", \"1\"]\nautostart = false\n");
-        f.take_calls();
-        f.app.apply_config_change("x", false).unwrap();
-        assert!(f.take_calls().is_empty());
-        f.app.apply_config_change("x", true).unwrap();
-        assert!(
-            f.take_calls()
-                .join(";")
-                .contains("bootout hum.x;bootstrap hum.x")
+        f.app.start(&n("x")).unwrap();
+        let dev = App {
+            paths: f.app.paths.clone(),
+            ld: Box::new(f.ld),
+            hum_path: "/src/hum/target/release/hum".into(),
+        };
+        let s = config::load_service(&dev.paths, &n("x")).unwrap();
+        let reason = dev.sync_reason(&s, &f.status("x")).unwrap();
+        assert_eq!(
+            reason,
+            "plist runs /opt/homebrew/bin/hum, this hum is /src/hum/target/release/hum"
         );
-        let s = config::load_service(&f.app.paths, "x").unwrap();
-        assert_eq!(f.app.plist_current(&s), (true, true));
+        assert_eq!(dev.plan().unwrap().0[0].reason, reason);
+    }
+
+    // Requirement: show 输出, 环境变量值默认遮蔽
+    #[test]
+    fn show_masks_values_unless_revealed() {
+        let f = fixture();
+        f.write(
+            "x",
+            "command = [\"sleep\", \"1\"]\n[env]\nTOKEN = \"secret\"\n",
+        );
+        let token = |r: &Report| {
+            r.env
+                .iter()
+                .find(|v| v.key == "TOKEN")
+                .unwrap()
+                .value
+                .clone()
+        };
+        let masked = f.app.show(&n("x"), false).unwrap();
+        assert_eq!(token(&masked), MASK);
+        assert!(!serde_json::to_string(&masked).unwrap().contains("secret"));
+        assert_eq!(token(&f.app.show(&n("x"), true).unwrap()), "secret");
     }
 
     // Requirement: 环境从零组装, env 文件缺失时拒绝启动
@@ -962,16 +1243,17 @@ mod tests {
             ("HOME".to_string(), home.display().to_string()),
             ("USER".into(), "me".into()),
         ]);
-        let ex = f.app.prepare_run("t3", &base).unwrap();
+        let ex = f.app.prepare_run(&n("t3"), &base).unwrap();
         assert!(ex.program.ends_with("bin/sh"), "{}", ex.program.display());
         assert_eq!(ex.dir, cwd);
         assert_eq!(ex.env["PATH"], "/usr/bin:/bin");
         assert_eq!(ex.env["PORT"], "3773");
         assert_eq!(ex.env["FROM_FILE"], format!("{}/x", home.display()));
         assert_eq!(ex.env["USER"], "me");
+        assert!(ex.warnings.is_empty());
 
         fs::remove_file(cwd.join(".env")).unwrap();
-        let err = f.app.prepare_run("t3", &base).err().unwrap();
+        let err = f.app.prepare_run(&n("t3"), &base).err().unwrap();
         assert!(err.downcast_ref::<EnvFileError>().is_some(), "{err:#}");
     }
 
@@ -985,7 +1267,7 @@ mod tests {
         );
         fs::create_dir_all(&f.app.paths.log_dir).unwrap();
         fs::write(f.app.paths.log_file("x"), "more than ten bytes").unwrap();
-        f.app.prepare_run("x", &BTreeMap::new()).unwrap();
+        f.app.prepare_run(&n("x"), &BTreeMap::new()).unwrap();
         let files = logfile::rotated(&f.app.paths.log_file("x")).unwrap();
         assert_eq!(files.len(), 1);
         assert_eq!(
@@ -998,14 +1280,15 @@ mod tests {
     #[test]
     fn doctor_reports_problems() {
         let f = fixture();
-        f.write("bad", "command = [\"definitely-not-a-command\"]\ncwd = \"/nonexistent\"\nenv_file = [\".env\"]\n");
-        let msgs: Vec<String> = f
-            .app
-            .doctor()
-            .unwrap()
-            .into_iter()
+        f.write(
+            "bad",
+            "command = [\"definitely-not-a-command\"]\ncwd = \"/nonexistent\"\nenv_file = [\".env\"]\n",
+        );
+        let findings = f.app.doctor().unwrap();
+        let msgs: Vec<&str> = findings
+            .iter()
             .filter(|x| x.subject == "bad")
-            .map(|x| x.message)
+            .map(|x| x.message.as_str())
             .collect();
         let joined = msgs.join("\n");
         for want in [
