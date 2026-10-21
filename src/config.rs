@@ -603,14 +603,14 @@ mod tests {
         assert_eq!(s.argv(), ["t3", "server"]);
     }
 
-    // Requirement: 字符串形式的 command
+    // Requirement: Command as a string
     #[test]
     fn shell_command() {
         let s = parse_service(&n("x"), r#"command = "echo hi && sleep 1""#).unwrap();
         assert_eq!(s.argv(), ["/bin/sh", "-c", "echo hi && sleep 1"]);
     }
 
-    // Requirement: 严格解析
+    // Requirement: Strict parsing
     #[test]
     fn strict_parsing_rejects_invalid_files() {
         let cases = [
@@ -633,7 +633,7 @@ mod tests {
         }
     }
 
-    // Requirement: 文件名即服务名
+    // Requirement: File name is the service name
     #[test]
     fn service_names_must_match_the_pattern() {
         for ok in ["t3", "api-server", "a_b", "0x"] {
@@ -660,7 +660,7 @@ mod tests {
         }
     }
 
-    // Requirement: 服务配置覆盖全局日志设置
+    // Requirement: Service log settings override global ones
     #[test]
     fn service_log_settings_override_global() {
         assert_eq!(effective_log(&Global::default(), None), (10 << 20, 3));
@@ -677,7 +677,7 @@ mod tests {
         );
     }
 
-    // Requirement: 命令行修改字段
+    // Requirement: Change fields from the command line
     #[test]
     fn every_edit_key_produces_a_valid_config() {
         let samples = [
@@ -715,7 +715,7 @@ mod tests {
         assert!(EditKey::parse("autostart").unwrap().value("yes").is_err());
     }
 
-    // Requirement: 路径展开
+    // Requirement: Path expansion
     #[test]
     fn path_expansion() {
         let home = Path::new("/Users/me");
@@ -763,7 +763,7 @@ mod tests {
         assert_eq!(got.restart, Restart::OnFailure);
     }
 
-    // Requirement: 首次运行时创建
+    // Requirement: Created on first run
     #[test]
     fn global_is_created_once_with_path() {
         let dir = tempfile::tempdir().unwrap();

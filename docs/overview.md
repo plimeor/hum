@@ -3,34 +3,34 @@ Updated 2026-10-21
 
 ## What this is
 
-hum 是一个用 Rust 写的 macOS CLI，把常驻后台命令（如 `t3 server`）注册成 launchd 服务，并用一个目录里的 TOML 文件统一管理它们。
+hum is a macOS CLI written in Rust that registers long-running background commands (such as `t3 server`) as launchd services and manages them through TOML files in one directory.
 
 ## Principles
 
-- **一个文件就是一个服务**：和 fish 的 `functions/` 一样，`services/` 下每个 `<name>.toml` 就是一个服务，文件名即服务名。文件是唯一事实来源，plist 是生成物。
-- **托管交给 launchd**：常驻、崩溃重启、登录自启都由系统负责，hum 没有自己的常驻 daemon。
-- **手动跑和托管跑行为一致**：launchd 启动的是 `hum run <name>`，前台调试用的也是它，避免“手动能跑、托管就挂”。
-- **改配置不用重新注册**：命令、目录、环境变量都在启动时读取，restart 即生效。
+- **One file is one service**: like fish's `functions/`, each `<name>.toml` under `services/` is one service, named after its file. The file is the single source of truth; the plist is generated from it.
+- **launchd does the supervising**: keeping services alive, restarting them after a crash, and starting them at login are the system's job; hum has no daemon of its own.
+- **Manual and managed runs behave the same**: launchd starts `hum run <name>`, and foreground debugging uses the same command, so nothing works by hand yet fails under launchd.
+- **Config changes need no re-registration**: the command, working directory, and environment variables are read at start time, so a restart is enough.
 
 ## Status
 Shipped features are described in `docs/specs/`.
 
 ## Current focus
 
-v1：只支持 macOS（arm64 / x64），实现全部 14 个命令。代码与测试已完成；launchd 以 `O_APPEND` 打开日志、copytruncate 轮转可行，已在 Mac 上实测。剩余的是在真实 Mac 上完成验证计划：
+v1: macOS only (arm64 / x64), all 14 commands. The code and tests are done, and on a Mac it has been confirmed that launchd opens logs with `O_APPEND`, so copytruncate rotation works. What remains is the validation plan on a real Mac:
 
-- 编译 Rust 版并跑真实 launchd 测试：`cargo test -- --ignored --test-threads=1 launchd::macos`。
-- 本机集成：`hum new sleeper -- sleep 1000` 后 `ls` 显示 running；`kill -9` 后约 10 秒内被拉起；`stop` 后不再拉起；`rm` 后 plist 和配置都消失。
-- 环境变量：launchd 托管运行和 `hum run` 前台运行的环境一致。
-- 登录与升级：注销重新登录后 `autostart = true` 的服务自动启动、已 `stop` 的不启动；brew 升级 hum 后服务仍能正常重启。
+- Build the Rust version and run the real-launchd tests: `cargo test -- --ignored --test-threads=1 launchd::macos`.
+- Local integration: after `hum new sleeper -- sleep 1000`, `ls` shows running; after `kill -9` it is started again within about 10 seconds; after `stop` it is not started again; after `rm` both the plist and the config are gone.
+- Environment: a service run by launchd and the same service run with `hum run` in the foreground see the same environment.
+- Login and upgrades: after logging out and back in, services with `autostart = true` start and stopped ones do not; after upgrading hum with brew, services still restart normally.
 
 ## Next
 
-以上全部通过，且 `t3 server` 作为第一个真实服务稳定跑满一周，即发布 v0.1.0。
+Release v0.1.0 once all of the above pass and `t3 server` has run as the first real service for a full week.
 
 ## Non-goals
 
-- Linux / systemd 支持
-- 健康检查、服务间依赖、定时任务、资源限制
-- TUI 面板
-- 以 root 身份运行的系统级 daemon（`/Library/LaunchDaemons`）
+- Linux / systemd support
+- Health checks, dependencies between services, scheduled jobs, resource limits
+- A TUI dashboard
+- System-wide daemons running as root (`/Library/LaunchDaemons`)

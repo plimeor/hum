@@ -1,32 +1,32 @@
-# 服务生命周期
+# Service lifecycle
 Type: feature
 
 ## Purpose
 
-`hum start`、`stop`、`restart`、`rm` 通过 launchd 控制服务的运行、登录自启和崩溃重启。由 app 模块拥有，launchd 操作封装在 launchd 模块后面。
+`hum start`, `stop`, `restart`, and `rm` control through launchd whether a service runs, starts at login, and restarts after it exits. Owned by the app module, with launchd calls behind the launchd module.
 
 ## Requirements
 
-### Requirement: launchd 任务的位置与标签
-每个服务必须注册为当前用户的 LaunchAgent，label 为 `hum.<name>`，plist 位于 `~/Library/LaunchAgents/hum.<name>.plist`；plist 只由 hum 生成。
+### Requirement: launchd job location and label
+Each service MUST be registered as a LaunchAgent of the current user, with label `hum.<name>` and plist at `~/Library/LaunchAgents/hum.<name>.plist`; only hum generates that plist.
 
-### Requirement: 重启策略
-`restart = "always"` 的服务必须在每次退出后被 launchd 重新拉起；`"on-failure"` 必须只在非零退出后被拉起；`"never"` 不得被拉起。两次拉起之间的间隔由 launchd 决定。
+### Requirement: Restart policy
+A service with `restart = "always"` MUST be started again by launchd every time it exits; `"on-failure"` MUST be started again only after a non-zero exit; `"never"` MUST NOT be started again. launchd decides the interval between starts.
 
-### Requirement: 登录自启
-`autostart = true` 且未被 stop 的服务必须在用户登录时启动；`autostart = false` 的服务登录时不得启动。
+### Requirement: Start at login
+A service with `autostart = true` that has not been stopped MUST start when the user logs in; a service with `autostart = false` MUST NOT start at login.
 
 ### Requirement: start
-`hum start` 必须解除 stop 造成的禁用、按当前配置重新生成 plist 并启动服务，`autostart = false` 的服务也要启动；服务已在运行时不得做任何操作。
+`hum start` MUST clear the disabled state left by `stop`, regenerate the plist from the current config, and start the service, including a service with `autostart = false`; when the service is already running it MUST do nothing.
 
 ### Requirement: stop
-`hum stop` 必须停止服务，并使其在之后的登录中也不启动，直到执行 `hum start` 或 `hum restart`。
+`hum stop` MUST stop the service and keep it from starting at later logins, until `hum start` or `hum restart` runs.
 
 ### Requirement: restart
-`hum restart` 必须按当前配置重新生成 plist 并重启服务，使配置与 `.env` 的改动在此时生效；已被 stop 的服务也要重新启用并启动。
+`hum restart` MUST regenerate the plist from the current config and restart the service, so that changes to the config and `.env` files take effect then; a stopped service MUST be enabled again and started.
 
 ### Requirement: rm
-`hum rm` 必须停止服务、删除其 plist，再删除配置文件；除非给出 `-y`，必须先请求确认；给出 `--keep-config` 时只注销，保留配置文件。之后新建的同名服务不得继承被删服务的 stop 状态。
+`hum rm` MUST stop the service, delete its plist, and then delete its config file; unless `-y` is given it MUST ask for confirmation first; with `--keep-config` it only unregisters and keeps the config file. A service created later with the same name MUST NOT inherit the removed service's stopped state.
 
-### Requirement: plist 中的 hum 路径
-写入 plist 的 hum 路径必须在 PATH 上存在指向当前二进制的稳定路径（如包管理器的符号链接）时优先使用它，而不是升级后会失效的版本化路径。
+### Requirement: hum path in the plist
+When a stable path to the current binary exists on `PATH` (such as a package manager's symlink), the hum path written into the plist MUST be that path rather than a versioned path that breaks on upgrade.

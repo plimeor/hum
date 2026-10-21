@@ -1,35 +1,35 @@
-# 新建与修改配置
+# Creating and changing configs
 Type: feature
 
 ## Purpose
 
-用户通过 `hum new`、`hum edit`、`hum set`、`hum unset` 创建和修改服务配置，改动校验通过后才落盘，并按规则生效。由 CLI 模块拥有。
+Users create and change service configs with `hum new`, `hum edit`, `hum set`, and `hum unset`; a change is written only after it validates, and takes effect by the rules below. Owned by the CLI module.
 
 ## Requirements
 
-### Requirement: 新建服务
-`hum new <name> [flags] -- <cmd> [args...]` 必须把 `--` 之后的参数原样写成 `command` 数组，`cwd` 默认取当前目录，并支持 `--cwd`、可重复的 `--env K=V` 与 `--env-file PATH`、`--restart`、`--no-autostart`；除非给出 `--no-start`，必须随即启动服务。
+### Requirement: Create a service
+`hum new <name> [flags] -- <cmd> [args...]` MUST write the arguments after `--` unchanged as the `command` array, default `cwd` to the current directory, and accept `--cwd`, repeatable `--env K=V` and `--env-file PATH`, `--restart`, and `--no-autostart`; unless `--no-start` is given, it MUST start the service right away.
 
-### Requirement: 新建不覆盖
-同名服务已存在时，`hum new` 必须报错退出，且不得修改已有配置。
+### Requirement: New never overwrites
+When a service of the same name exists, `hum new` MUST fail and MUST NOT change the existing config.
 
-### Requirement: 新建时只警告不阻止
-`command` 的第一个参数在全局 `PATH` 中找不到、或 `env_file` 指向的文件不存在时，`hum new` 必须给出警告，仍然写入配置。
+### Requirement: New warns but does not block
+When the first argument of `command` is not found in the global `PATH`, or an `env_file` does not exist, `hum new` MUST warn and still write the config.
 
-### Requirement: 在编辑器中修改
-`hum edit <name>` 与 `hum edit --global` 必须在临时副本上打开 `$VISUAL`，未设置时用 `$EDITOR`，都未设置时用 `vi`；保存后校验，失败时必须提示错误并询问是否重新编辑，原文件保持不变；校验通过后必须原子替换原文件。
+### Requirement: Edit in an editor
+`hum edit <name>` and `hum edit --global` MUST open a temporary copy in `$VISUAL`, falling back to `$EDITOR` and then `vi`; after saving it validates the copy. On failure it MUST show the error and ask whether to edit again, leaving the original file unchanged; a closed stdin counts as no. On success it MUST replace the original file atomically.
 
-### Requirement: 命令行修改字段
-`hum set <name> <key>=<value>...` 与 `hum unset <name> <key>...` 必须只接受 `command`、`cwd`、`env_file`、`autostart`、`restart`、`env.<NAME>`、`log.max_size`、`log.keep`；`env_file` 的值以逗号分隔多个路径；`command` 必须通过 `hum set <name> command -- <cmd> [args...]` 设置，且不能被 unset。
+### Requirement: Change fields from the command line
+`hum set <name> <key>=<value>...` and `hum unset <name> <key>...` MUST accept only `command`, `cwd`, `env_file`, `autostart`, `restart`, `env.<NAME>`, `log.max_size`, and `log.keep`. An `env_file` value separates several paths with commas. `command` MUST be set through `hum set <name> command -- <cmd> [args...]` and cannot be unset.
 
-### Requirement: 修改保留注释
-`hum set` 与 `hum unset` 必须只改动目标键所在的内容，文件中其余文本（包括注释）必须保持不变。
+### Requirement: Edits keep comments
+`hum set` and `hum unset` MUST change only the content of the target key; every other piece of text in the file, comments included, MUST stay unchanged.
 
-### Requirement: 无效结果不落盘
-`hum set` 或 `hum unset` 的结果不是有效配置时，必须报错退出，且不得修改文件。
+### Requirement: Invalid results are not written
+When the result of `hum set` or `hum unset` is not a valid config, the command MUST fail and MUST NOT change the file.
 
-### Requirement: 服务配置改动的生效
-服务配置经 `edit`、`set` 或 `unset` 改动后，如果服务正在运行，hum 必须自动 restart 它；给出 `--no-restart` 时，或服务已被 launchd 加载但未在运行时，不得重启或启动它，并提示需要 restart 才能生效，在此之前 `hum ls` 必须把它标为与 launchd 不一致。
+### Requirement: When a service config change takes effect
+After `edit`, `set`, or `unset` changes a service config, hum MUST restart the service automatically if it is running. With `--no-restart`, or when launchd has the job loaded but it is not running, hum MUST NOT restart or start it, MUST say that a restart is needed for the change to take effect, and until then `hum ls` MUST flag the service as out of sync with launchd.
 
-### Requirement: 全局配置改动不重启
-`hum edit --global` 改动后不得重启任何服务，必须输出一行提示：改动会在各服务下次重启后生效。
+### Requirement: Global config changes restart nothing
+After `hum edit --global` changes the global config, hum MUST NOT restart any service and MUST print one line saying the change takes effect when each service next restarts.

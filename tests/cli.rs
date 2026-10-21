@@ -62,7 +62,7 @@ fn stderr(o: &Output) -> String {
     String::from_utf8_lossy(&o.stderr).into_owned()
 }
 
-// Requirement: 新建不覆盖, 新建时只警告不阻止, 首次运行时创建
+// Requirement: New never overwrites, New warns but does not block, Created on first run
 #[test]
 fn new_warns_and_never_overwrites() {
     let h = Home::new();
@@ -92,7 +92,7 @@ fn new_warns_and_never_overwrites() {
     assert_eq!(fs::read_to_string(h.service_file("demo")).unwrap(), before);
 }
 
-// Requirement: 无效结果不落盘, 失败退出状态
+// Requirement: Invalid results are not written, Exit status on failure
 #[test]
 fn invalid_set_leaves_the_file_alone() {
     let h = Home::new();
@@ -104,7 +104,7 @@ fn invalid_set_leaves_the_file_alone() {
     assert_eq!(after, "command = [\"true\"]  # keep\n");
 }
 
-// Requirement: 在编辑器中修改, 全局配置改动不重启
+// Requirement: Edit in an editor, Global config changes restart nothing
 #[test]
 fn edit_validates_and_global_edit_only_hints() {
     let h = Home::new();
@@ -131,7 +131,7 @@ fn edit_validates_and_global_edit_only_hints() {
     assert!(global.contains("\nkeep = 5\n"), "{global}");
 }
 
-// Requirement: 日志位置, 查看日志, 立即轮转, 多个服务名与 --all
+// Requirement: Log location, View logs, Rotate now, Multiple names and --all
 #[test]
 fn logs_view_and_rotate() {
     let h = Home::new();
@@ -160,7 +160,7 @@ fn logs_view_and_rotate() {
     assert!(again.contains("nothing to rotate"), "{again}");
 }
 
-// Requirement: 替换为服务进程, 环境从零组装
+// Requirement: Replace itself with the service, Environment built from scratch
 #[test]
 fn run_replaces_itself_with_the_service() {
     let h = Home::new();
@@ -181,7 +181,7 @@ fn run_replaces_itself_with_the_service() {
     assert_eq!(stdout(&o), format!("pid={pid} lang=unset port=3773\n"));
 }
 
-// Requirement: env 文件缺失时拒绝启动, 失败退出状态
+// Requirement: Refuse to start without an env file, Exit status on failure
 #[test]
 fn run_refuses_to_start_without_its_env_file() {
     let h = Home::new();
@@ -199,7 +199,7 @@ fn run_refuses_to_start_without_its_env_file() {
     );
 }
 
-// Requirement: 补全脚本
+// Requirement: Completion scripts
 #[test]
 fn completion_scripts() {
     let h = Home::new();

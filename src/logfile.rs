@@ -200,7 +200,7 @@ mod tests {
             .collect()
     }
 
-    // Requirement: 轮转方式
+    // Requirement: How rotation works
     #[test]
     fn naming_retention_and_truncate_in_place() {
         let dir = tempfile::tempdir().unwrap();
@@ -231,7 +231,7 @@ mod tests {
         assert_eq!(fs::read_to_string(&other).unwrap(), "other service");
     }
 
-    // Requirement: 轮转方式
+    // Requirement: How rotation works
     #[test]
     fn same_second_gets_suffixes() {
         let dir = tempfile::tempdir().unwrap();
@@ -252,7 +252,7 @@ mod tests {
         assert_eq!(fs::read_to_string(&files[0]).unwrap(), "c");
     }
 
-    // Requirement: 空日志不轮转
+    // Requirement: Empty logs are not rotated
     #[test]
     fn empty_log_and_keep_zero() {
         let dir = tempfile::tempdir().unwrap();
@@ -265,7 +265,7 @@ mod tests {
         assert!(rotated(&p).unwrap().is_empty());
     }
 
-    // Requirement: 自动轮转
+    // Requirement: Automatic rotation
     #[test]
     fn rotates_at_max_size() {
         let dir = tempfile::tempdir().unwrap();
@@ -277,7 +277,7 @@ mod tests {
         assert!(rotate_if_needed(&p, 10, 3, t0(14)).unwrap());
     }
 
-    // Requirement: 查看日志
+    // Requirement: View logs
     #[test]
     fn tail_last_lines() {
         let dir = tempfile::tempdir().unwrap();
@@ -295,7 +295,7 @@ mod tests {
         assert!(tail(&dir.path().join("none"), 5).unwrap().0.is_empty());
     }
 
-    // Requirement: 跟踪日志
+    // Requirement: Follow logs
     #[test]
     fn follow_survives_truncate() {
         let dir = tempfile::tempdir().unwrap();

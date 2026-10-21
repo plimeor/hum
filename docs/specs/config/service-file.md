@@ -1,35 +1,35 @@
-# 服务配置文件
+# Service config file
 Type: format
 
 ## Purpose
 
-`services/<name>.toml` 描述一个服务：运行什么、在哪运行、带什么环境、是否登录自启、退出后是否重启。它是服务的唯一事实来源，launchd plist 由它生成。由配置模块拥有。
+`services/<name>.toml` describes one service: what it runs, where, with which environment, whether it starts at login, and whether it is restarted after it exits. It is the service's single source of truth; the launchd plist is generated from it. Owned by the config module.
 
 ## Fields
 | Field | Type | Default | When invalid |
 |---|---|---|---|
-| `command` | 字符串数组（argv），或字符串（经 `/bin/sh -c` 执行） | 必填 | 缺失、空数组、空字符串或含非字符串元素时整个文件无效 |
-| `cwd` | 路径字符串，支持 `~` 与 `$HOME` | 空，此时为用户主目录 | 类型不符时文件无效；目录不存在不影响解析，`hum run` 时失败 |
-| `env_file` | 路径字符串数组，相对 `cwd`，支持 `~` 与 `$HOME` | `[]` | 含空字符串时文件无效 |
-| `autostart` | 布尔 | `true` | 类型不符时文件无效 |
-| `restart` | `always` \| `on-failure` \| `never` | `always` | 其他值时文件无效 |
-| `[env]` | 字符串到字符串的表，值按字面量处理 | `{}` | 值不是字符串、或键不符合 `[A-Za-z_][A-Za-z0-9_]*` 时文件无效 |
-| `[log].max_size` | 大小字符串，如 `"10MB"`；单位 `B`/`K`/`KB`/`M`/`MB`/`G`/`GB`，按 1024 进位 | 继承全局配置 | 无法解析或不为正数时文件无效 |
-| `[log].keep` | 非负整数 | 继承全局配置 | 负数时文件无效 |
+| `command` | array of strings (argv), or a string (run through `/bin/sh -c`) | required | The whole file is invalid when it is missing, an empty array, an empty string, or holds a non-string element |
+| `cwd` | path string; `~` and `$HOME` are expanded | empty, meaning the user's home directory | The file is invalid on a type mismatch; a directory that does not exist does not affect parsing and fails at `hum run` |
+| `env_file` | array of path strings, relative to `cwd`; `~` and `$HOME` are expanded | `[]` | The file is invalid when an entry is an empty string |
+| `autostart` | boolean | `true` | The file is invalid on a type mismatch |
+| `restart` | `always` \| `on-failure` \| `never` | `always` | The file is invalid on any other value |
+| `[env]` | table of string to string; values are taken literally | `{}` | The file is invalid when a value is not a string or a key does not match `[A-Za-z_][A-Za-z0-9_]*` |
+| `[log].max_size` | size string such as `"10MB"`; units `B`/`K`/`KB`/`M`/`MB`/`G`/`GB`, powers of 1024 | inherited from the global config | The file is invalid when it cannot be parsed or is not positive |
+| `[log].keep` | non-negative integer | inherited from the global config | The file is invalid when negative |
 
 ## Requirements
 
-### Requirement: 文件名即服务名
-服务配置必须位于配置目录的 `services/<name>.toml`，服务名取自文件名，且必须匹配 `[a-z0-9][a-z0-9_-]*`。
+### Requirement: File name is the service name
+A service config MUST live at `services/<name>.toml` in the config directory; the service name is taken from the file name and MUST match `[a-z0-9][a-z0-9_-]*`.
 
-### Requirement: 配置目录位置
-配置目录必须默认为 `~/.config/hum`；设置了 `$HUM_HOME` 时必须改用它，且 launchd 启动的 `hum run` 必须读取同一目录。
+### Requirement: Config directory location
+The config directory MUST default to `~/.config/hum`; when `$HUM_HOME` is set it MUST be used instead, and `hum run` started by launchd MUST read the same directory.
 
-### Requirement: 严格解析
-hum 必须拒绝含未知字段、类型不符或取值非法的配置文件，并在错误中指出出错的字段或位置；无效文件不得被部分采用。
+### Requirement: Strict parsing
+hum MUST reject a config file with an unknown field, a type mismatch, or an illegal value, and the error MUST name the field or position at fault; an invalid file MUST NOT be partly applied.
 
-### Requirement: 字符串形式的 command
-`command` 为字符串时，hum 必须以 `/bin/sh -c <command>` 运行它；为数组时，必须不经 shell 直接运行该 argv。
+### Requirement: Command as a string
+When `command` is a string, hum MUST run it as `/bin/sh -c <command>`; when it is an array, hum MUST run that argv directly, without a shell.
 
-### Requirement: 路径展开
-`cwd` 与 `env_file` 中开头的 `~` 以及 `$HOME`、`${HOME}` 必须展开为用户主目录，相对的 `env_file` 必须相对 `cwd` 解析；`[env]` 的值必须按字面量处理，不做任何展开。
+### Requirement: Path expansion
+A leading `~` and `$HOME` / `${HOME}` in `cwd` and `env_file` MUST expand to the user's home directory, and a relative `env_file` MUST resolve against `cwd`; values in `[env]` MUST be taken literally, with no expansion.

@@ -140,7 +140,7 @@ mod tests {
     use super::*;
     use std::fs;
 
-    // Requirement: 环境从零组装
+    // Requirement: Environment built from scratch
     #[test]
     fn layers_priority_and_sources() {
         let home = tempfile::tempdir().unwrap();
@@ -193,7 +193,7 @@ mod tests {
         assert_eq!(env.undefined[0].name, "SVC");
     }
 
-    // Requirement: env 文件缺失时拒绝启动
+    // Requirement: Refuse to start without an env file
     #[test]
     fn missing_env_file() {
         let home = tempfile::tempdir().unwrap();
@@ -208,7 +208,7 @@ mod tests {
         assert_eq!(err.path, home.path().join(".env"));
     }
 
-    // Requirement: 用组装后的 PATH 查找命令
+    // Requirement: Command lookup uses the assembled PATH
     #[test]
     fn look_path_uses_the_given_path() {
         let dir = tempfile::tempdir().unwrap();

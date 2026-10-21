@@ -1,23 +1,23 @@
-# 对齐与检查
+# Sync and checks
 Type: feature
 
 ## Purpose
 
-`hum apply` 让 launchd 与配置目录对齐，`hum doctor` 检查常见问题。用户直接在配置目录里增删改文件后，靠 `apply` 生效。由 app 模块拥有。
+`hum apply` brings launchd in line with the config directory, and `hum doctor` checks for common problems. After a user adds, removes, or edits files in the config directory directly, `apply` makes the change take effect. Owned by the app module.
 
 ## Requirements
 
-### Requirement: apply 对齐
-`hum apply` 必须以 `services/` 目录为准：为新的配置文件生成 plist 并注册；注销没有配置文件的 hum plist 并删除它；重新生成过期的 plist 并重新加载，重新加载前在运行的服务之后仍在运行。
+### Requirement: apply aligns launchd
+`hum apply` MUST take the `services/` directory as the source of truth: generate and register a plist for each new config file; unregister and delete every hum plist that has no config file; regenerate and reload each outdated plist, with a service that was running before the reload still running after it.
 
-### Requirement: apply 跳过无效配置
-`hum apply` 必须跳过无效的配置文件并逐个报告，继续处理其余服务，最后以非零状态退出。
+### Requirement: apply skips invalid configs
+`hum apply` MUST skip invalid config files, report each one, carry on with the remaining services, and finally exit with a non-zero status.
 
-### Requirement: apply 预演
-`hum apply --dry-run` 必须只列出将要进行的改动，不得改动任何文件或 launchd 状态。
+### Requirement: apply dry run
+`hum apply --dry-run` MUST only list the changes it would make, and MUST NOT change any file or launchd state.
 
-### Requirement: doctor 检查项
-`hum doctor` 必须检查：全局配置有效且设置了 `PATH`；每个服务配置有效；`command` 能在全局 `PATH` 中找到；`cwd` 存在；`env_file` 都存在；plist 中的 hum 路径存在且可执行，并对升级后会失效的版本化路径给出警告；配置与 launchd 一致；没有对应配置的 hum plist；日志轮转任务已安装；日志异常增大。
+### Requirement: doctor checks
+`hum doctor` MUST check that the global config is valid and sets `PATH`; that each service config is valid; that `command` is found in the global `PATH`; that `cwd` exists; that every `env_file` exists; that the hum path in each plist exists and is executable, warning about a versioned path that breaks on upgrade; that the config and launchd agree; that no hum plist lacks a config; that the log rotation job is installed; and that no log has grown abnormally large.
 
-### Requirement: doctor 退出状态
-`hum doctor` 发现错误级问题时必须以非零状态退出；只有警告时以零退出。
+### Requirement: doctor exit status
+`hum doctor` MUST exit with a non-zero status when it finds an error-level problem, and with zero when it finds only warnings.

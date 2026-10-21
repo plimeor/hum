@@ -1057,7 +1057,7 @@ mod tests {
         assert!(f.loaded_def_current("x"));
     }
 
-    // Requirement: 服务配置改动的生效
+    // Requirement: When a service config change takes effect
     #[test]
     fn config_change_on_a_loaded_stopped_job() {
         // A crashed job stays loaded. Its config change must not start it,
@@ -1079,7 +1079,7 @@ mod tests {
         assert!(!f.row("x").out_of_sync());
     }
 
-    // Requirement: 服务配置改动的生效
+    // Requirement: When a service config change takes effect
     #[test]
     fn config_change_on_an_unloaded_job_rewrites_its_plist() {
         let f = fixture();
@@ -1096,7 +1096,7 @@ mod tests {
         );
     }
 
-    // Requirement: 服务配置改动的生效, 标出与 launchd 不一致
+    // Requirement: When a service config change takes effect, Flag mismatches with launchd
     #[test]
     fn config_change_on_a_running_job() {
         let f = fixture();
@@ -1120,7 +1120,7 @@ mod tests {
         assert!(!f.row("x").out_of_sync());
     }
 
-    // Requirement: 标出与 launchd 不一致, apply 对齐, apply 跳过无效配置
+    // Requirement: Flag mismatches with launchd, apply aligns launchd, apply skips invalid configs
     #[test]
     fn states_and_apply() {
         let f = fixture();
@@ -1185,7 +1185,7 @@ mod tests {
         assert!(a.plan().unwrap().0.is_empty());
     }
 
-    // Requirement: 标出与 launchd 不一致
+    // Requirement: Flag mismatches with launchd
     #[test]
     fn a_different_hum_binary_is_named_as_the_reason() {
         let f = fixture();
@@ -1205,7 +1205,7 @@ mod tests {
         assert_eq!(dev.plan().unwrap().0[0].reason, reason);
     }
 
-    // Requirement: show 输出, 环境变量值默认遮蔽
+    // Requirement: show output, Environment values masked by default
     #[test]
     fn show_masks_values_unless_revealed() {
         let f = fixture();
@@ -1227,7 +1227,7 @@ mod tests {
         assert_eq!(token(&f.app.show(&n("x"), true).unwrap()), "secret");
     }
 
-    // Requirement: 环境从零组装, env 文件缺失时拒绝启动
+    // Requirement: Environment built from scratch, Refuse to start without an env file
     #[test]
     fn prepare_run() {
         let f = fixture();
@@ -1257,7 +1257,7 @@ mod tests {
         assert!(err.downcast_ref::<EnvFileError>().is_some(), "{err:#}");
     }
 
-    // Requirement: 启动前检查日志大小
+    // Requirement: Check the log size before starting
     #[test]
     fn prepare_run_rotates_an_oversized_log() {
         let f = fixture();
@@ -1276,7 +1276,7 @@ mod tests {
         );
     }
 
-    // Requirement: doctor 检查项
+    // Requirement: doctor checks
     #[test]
     fn doctor_reports_problems() {
         let f = fixture();

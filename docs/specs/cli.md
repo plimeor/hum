@@ -1,20 +1,20 @@
-# 命令行通用约定
+# Command-line conventions
 Type: feature
 
 ## Purpose
 
-所有 hum 命令共享的参数、多服务处理和退出状态约定。由 CLI 模块拥有。
+The arguments, multi-service handling, and exit status shared by every hum command. Owned by the CLI module.
 
 ## Requirements
 
-### Requirement: 多个服务名与 --all
-`start`、`stop`、`restart`、`rm`、`logs` 必须接受多个服务名或 `--all`（全部有配置文件的服务），二者不能同时给出。`start`、`stop`、`restart`、`rm` 与 `logs --rotate` 中某个服务失败时，必须报告并继续处理其余服务，最后以非零状态退出。
+### Requirement: Multiple names and --all
+`start`, `stop`, `restart`, `rm`, and `logs` MUST accept several service names or `--all` (every service with a config file), but not both. When one service fails in `start`, `stop`, `restart`, `rm`, or `logs --rotate`, hum MUST report it, carry on with the rest, and finally exit with a non-zero status.
 
-### Requirement: 跳过确认
-全局参数 `-y` 必须跳过所有确认提示，并视为同意。
+### Requirement: Skip confirmation
+The global `-y` flag MUST skip every confirmation prompt and count as agreeing.
 
-### Requirement: 补全脚本
-`hum completion fish|zsh|bash` 必须输出对应 shell 的补全脚本，补全中包含已配置的服务名。
+### Requirement: Completion scripts
+`hum completion fish|zsh|bash` MUST print the completion script for that shell, and completion MUST offer the configured service names.
 
-### Requirement: 失败退出状态
-任何命令失败时必须向标准错误输出原因，并以非零状态退出。
+### Requirement: Exit status on failure
+When any command fails, it MUST print the reason to standard error and exit with a non-zero status.

@@ -304,7 +304,7 @@ mod tests {
         }
     }
 
-    // Requirement: 变量展开, 只向前引用, 非引用的 `$` 保持原样
+    // Requirement: Variable expansion, Forward-only references, A `$` that is not a reference stays literal
     #[test]
     fn expansion_is_forward_only() {
         let src = "DATA_DIR=${HOME}/data\nURL=\"http://$HOST:${PORT}/x\"\nPORT=8080\nLATE=${PORT}\nESC=\\$HOME\nLOWER=$lower_var\nDOLLAR=cost $5 and $ alone and ${unterminated\n";

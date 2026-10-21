@@ -73,7 +73,7 @@ mod tests {
         );
     }
 
-    // Requirement: 重启策略, 登录自启
+    // Requirement: Restart policy, Start at login
     #[test]
     fn always() {
         golden(
@@ -90,7 +90,7 @@ mod tests {
         );
     }
 
-    // Requirement: 重启策略, 登录自启, 配置目录位置
+    // Requirement: Restart policy, Start at login, Config directory location
     #[test]
     fn on_failure_without_autostart() {
         golden(
@@ -112,7 +112,7 @@ mod tests {
         );
     }
 
-    // Requirement: 自动轮转
+    // Requirement: Automatic rotation
     #[test]
     fn rotate_job() {
         golden(

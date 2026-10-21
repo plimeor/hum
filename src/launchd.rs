@@ -242,7 +242,7 @@ mod tests {
         );
     }
 
-    // Requirement: 服务状态
+    // Requirement: Service state
     #[test]
     fn print_crashed() {
         let st = parse_print(
@@ -391,7 +391,7 @@ mod macos {
         ld.bootstrap(&j.plist).unwrap();
     }
 
-    // Requirement: 服务状态
+    // Requirement: Service state
     #[test]
     #[ignore = "needs macOS launchd"]
     fn a_failed_job_reads_as_crashed() {

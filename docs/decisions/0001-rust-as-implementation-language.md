@@ -1,33 +1,33 @@
-# 0001: 用 Rust 实现 hum
+# 0001: Implement hum in Rust
 
 Status: Accepted
 Date: 2026-10-21
 
 ## Context
 
-hum 先用 Go 实现了全部 14 个命令。用户的判断是：代码越少，出错的概率通常越低，因此想知道换一种语言能少多少代码。比较时有两个前提：
+hum was first implemented in Go, with all 14 commands. The user's view was that less code usually means fewer bugs, so the question was how much code a different language would save. Two facts framed the comparison:
 
-- hum 有两块逻辑必须手写，与语言无关：`hum set` / `unset` 修改配置时保留注释；`.env` 展开变量时要查到更低优先级的层（基础变量、全局 `[env]`、前面的 env 文件），并报告未定义的引用。
-- `hum run` 要用 exec 把自身替换成服务进程，见 `docs/specs/run.md`。
+- Two pieces of logic have to be hand-written whatever the language: `hum set` / `unset` keep comments when changing a config, and `.env` expansion must resolve against lower-priority layers (base variables, global `[env]`, earlier env files) and report undefined references.
+- `hum run` replaces itself with the service process via exec; see `docs/specs/run.md`.
 
 ## Decision
 
-hum 用 Rust 实现，取代 Go 版本。
+hum is implemented in Rust, replacing the Go version.
 
 ## Considered options
 
-- **Go（原实现）**：cobra 自带子命令、帮助和补全。主要的额外代码来自显式错误处理：生产代码中约有 340 处错误检查。保留注释的 TOML 编辑是手写的，共 416 行。
-- **Bun / TypeScript**：`Bun.TOML.stringify` 从普通对象生成文本，会丢掉注释；`util.parseEnv` 不展开变量。所以两块必须手写的逻辑都省不掉。`util.parseArgs` 没有子命令和补全。`bun build --compile` 编出的 hello world 有 77.5 MB。`process.execve` 在 Bun 1.4.2 的 Linux 上可用，macOS 上未验证。否决的理由是：省下的主要是错误处理样板，难点一样不少，单文件分发的体积却大一个数量级。
-- **Rust（选定）**：
-  - `toml_edit` 保留注释，手写编辑缩减到约 60 行；
-  - serde 的 `deny_unknown_fields` 和枚举直接表达严格解析；
-  - clap 和 clap_complete 提供子命令与动态补全；
-  - 标准库自带 exec；
-  - `dotenvy` 只查进程环境、不报告未定义引用，所以 `.env` 解析仍然手写。
+- **Go (the original)**: cobra gives subcommands, help, and completion. Most of the extra code is explicit error handling, about 340 error checks in production code. The comment-preserving TOML editor is hand-written, 416 lines.
+- **Bun / TypeScript**: `Bun.TOML.stringify` writes from a plain object and drops comments, and `util.parseEnv` does not expand variables, so neither hand-written piece goes away. `util.parseArgs` has no subcommands or completion. `bun build --compile` produces a 77.5 MB hello world. `process.execve` works in Bun 1.4.2 on Linux; macOS was not checked. Rejected because the savings are mostly error-handling boilerplate, the hard parts stay, and a single-file binary is an order of magnitude larger.
+- **Rust (chosen)**:
+  - `toml_edit` preserves comments, shrinking the hand-written editor to about 60 lines;
+  - serde's `deny_unknown_fields` and enums express strict parsing directly;
+  - clap and clap_complete provide subcommands and dynamic completion;
+  - the standard library has exec;
+  - `dotenvy` resolves references only against the process environment and does not report undefined ones, so `.env` parsing stays hand-written.
 
 ## Consequences
 
-- 生产代码（不含空行、注释，按各自默认格式化）从 Go 的 3,508 行降到 Rust 的 2,769 行，约少 21%。release 二进制从 5.1 MB 降到 2.9 MB。
-- 省下的行数大多来自错误处理和 TOML 编辑；分层 env 展开等逻辑与语言无关，仍需自己写对。
-- 动态补全依赖 `clap_complete` 的 `unstable-dynamic` 特性，升级该依赖时需要核对补全是否仍然可用。
-- 发布前必须在 Mac 上重新验证，因为 Go 版的验证结论不能直接沿用到 Rust 版。
+- Production code (blank lines and comments excluded, each formatted with its default tool) went from 3,508 lines of Go to 2,769 lines of Rust, about 21% fewer. The release binary went from 5.1 MB to 2.9 MB.
+- Most of the saving comes from error handling and the TOML editor; layered env expansion and similar logic are language-independent and still have to be right.
+- Dynamic completion depends on `clap_complete`'s `unstable-dynamic` feature; check that completion still works when upgrading it.
+- The Rust version needs its own validation on a Mac before release; the Go version's results do not carry over.

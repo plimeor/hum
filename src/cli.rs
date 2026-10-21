@@ -929,7 +929,7 @@ mod tests {
         Cli::command().debug_assert();
     }
 
-    // Requirement: 新建服务
+    // Requirement: Create a service
     #[test]
     fn new_requires_a_command_after_dashes() {
         assert!(Cli::try_parse_from(["hum", "new", "t3", "t3", "server"]).is_err());
@@ -939,14 +939,14 @@ mod tests {
         assert!(Cli::try_parse_from(ok).is_ok());
     }
 
-    // Requirement: 文件名即服务名
+    // Requirement: File name is the service name
     #[test]
     fn service_names_are_checked_while_parsing() {
         assert!(Cli::try_parse_from(["hum", "start", "Bad.Name"]).is_err());
         assert!(Cli::try_parse_from(["hum", "show", "_rotate"]).is_err());
     }
 
-    // Requirement: 自动轮转
+    // Requirement: Automatic rotation
     #[test]
     fn rotate_job_arguments_parse() {
         let args = std::iter::once("hum").chain(crate::app::ROTATE_ARGS);

@@ -83,7 +83,7 @@ PORT = "3773"  # avoid 3000
 DEBUG = "1"
 "#;
 
-    // Requirement: 修改保留注释
+    // Requirement: Edits keep comments
     #[test]
     fn set_replaces_values_and_keeps_comments() {
         let mut d = Doc::parse(SAMPLE).unwrap();
@@ -97,7 +97,7 @@ DEBUG = "1"
         );
     }
 
-    // Requirement: 修改保留注释
+    // Requirement: Edits keep comments
     #[test]
     fn set_inserts_into_existing_and_new_tables() {
         let mut d = Doc::parse(SAMPLE).unwrap();
@@ -118,7 +118,7 @@ DEBUG = "1"
         assert!(out.starts_with("# ~/.config/hum/services/t3.toml\n"));
     }
 
-    // Requirement: 修改保留注释
+    // Requirement: Edits keep comments
     #[test]
     fn unset_removes_only_that_key() {
         let mut d = Doc::parse(SAMPLE).unwrap();
