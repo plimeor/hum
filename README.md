@@ -62,7 +62,7 @@ Unknown fields and illegal values are errors, and an invalid file is never partl
 3. The service's `env_file` entries, in the order listed
 4. The service's `[env]`
 
-`${VAR}` and `$VAR` in `.env` files expand, but only to lower layers and lines above in the same file. An undefined variable becomes the empty string, and `hum show` points it out. Single-quoted values do not expand, and `\$` gives a literal `$`.
+`${VAR}` and `$VAR` in `.env` files expand, but only to lower layers and lines above in the same file. An undefined one becomes the empty string, which `hum show` points out; single-quoted values never expand, and `\$` gives a literal `$`.
 
 ### Commands
 

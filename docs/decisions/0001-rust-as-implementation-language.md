@@ -5,10 +5,9 @@ Date: 2026-10-21
 
 ## Context
 
-hum was first implemented in Go, with all 14 commands. The user's view was that less code usually means fewer bugs, so the question was how much code a different language would save. Two facts framed the comparison:
+hum was first implemented in Go, with all 14 commands. The maintainer's premise was that less code usually means fewer bugs, so the question was how much code a different language would save.
 
-- Two pieces of logic have to be hand-written whatever the language: `hum set` / `unset` keep comments when changing a config, and `.env` expansion must resolve against lower-priority layers (base variables, global `[env]`, earlier env files) and report undefined references.
-- `hum run` replaces itself with the service process via exec; see `docs/specs/run.md`.
+Two pieces of logic have to be hand-written whatever the language: `hum set` / `unset` keep comments when changing a config, and `.env` expansion must resolve against lower-priority layers (base variables, global `[env]`, earlier env files) and report undefined references. Any candidate also needs exec, because `hum run` replaces itself with the service (see decision 0002).
 
 ## Decision
 

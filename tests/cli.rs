@@ -62,7 +62,7 @@ fn stderr(o: &Output) -> String {
     String::from_utf8_lossy(&o.stderr).into_owned()
 }
 
-// Requirement: New never overwrites, New warns but does not block, Created on first run
+// Requirement: New never overwrites, Warnings do not block writes, Created on first run
 #[test]
 fn new_warns_and_never_overwrites() {
     let h = Home::new();
@@ -90,6 +90,23 @@ fn new_warns_and_never_overwrites() {
     assert!(!o.status.success());
     assert!(stderr(&o).contains("already exists"));
     assert_eq!(fs::read_to_string(h.service_file("demo")).unwrap(), before);
+}
+
+// Requirement: Warnings do not block writes
+#[test]
+fn set_warns_about_a_missing_env_file_and_still_writes() {
+    let h = Home::new();
+    h.write_service("demo", "command = [\"true\"]\n");
+    // After writing, `set` asks launchd about the service; that step is not
+    // under test here (it fails off macOS), so the exit status is not checked.
+    let o = h.run(&["set", "demo", "env_file=missing.env"]);
+    assert!(
+        stderr(&o).contains("missing.env does not exist"),
+        "{}",
+        stderr(&o)
+    );
+    let after = fs::read_to_string(h.service_file("demo")).unwrap();
+    assert!(after.contains("env_file = [\"missing.env\"]"), "{after}");
 }
 
 // Requirement: Invalid results are not written, Exit status on failure

@@ -13,8 +13,8 @@ Users create and change service configs with `hum new`, `hum edit`, `hum set`, a
 ### Requirement: New never overwrites
 When a service of the same name exists, `hum new` MUST fail and MUST NOT change the existing config.
 
-### Requirement: New warns but does not block
-When the first argument of `command` is not found in the global `PATH`, or an `env_file` does not exist, `hum new` MUST warn and still write the config.
+### Requirement: Warnings do not block writes
+When the first argument of `command` is not found in the global `PATH`, `hum new` MUST warn and still write the config. When an `env_file` does not exist, `hum new`, `edit`, `set`, and `unset` MUST warn and still write the config.
 
 ### Requirement: Edit in an editor
 `hum edit <name>` and `hum edit --global` MUST open a temporary copy in `$VISUAL`, falling back to `$EDITOR` and then `vi`; after saving it validates the copy. On failure it MUST show the error and ask whether to edit again, leaving the original file unchanged; a closed stdin counts as no. On success it MUST replace the original file atomically.
