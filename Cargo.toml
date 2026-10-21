@@ -3,6 +3,8 @@ name = "hum"
 version = "0.1.0"
 edition = "2024"
 description = "Run background commands as launchd services, configured by TOML files"
+license = "MIT OR Apache-2.0"
+rust-version = "1.88"
 publish = false
 
 [dependencies]
