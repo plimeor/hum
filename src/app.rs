@@ -874,6 +874,21 @@ fn check_program(plist_path: &Path) -> Option<(Severity, String)> {
     }
 }
 
+/// Checks the entries of the global PATH.
+fn check_global_path(path: &str) -> Vec<(Severity, String)> {
+    path.split(':')
+        .filter(|e| config::is_per_shell_path(e))
+        .map(|e| {
+            (
+                Severity::Warn,
+                format!(
+                    "PATH entry {e} belongs to a single shell session; replace it with the directory it resolves to"
+                ),
+            )
+        })
+        .collect()
+}
+
 impl App {
     pub fn doctor(&self) -> Result<Vec<Finding>> {
         let disabled = self.ld.disabled()?;
@@ -895,7 +910,13 @@ impl App {
                 g
             }
             Ok(g) => {
-                add("global", (Severity::Ok, "config ok".into()));
+                let mut problems = check_global_path(&g.env["PATH"]);
+                if problems.is_empty() {
+                    problems.push((Severity::Ok, "config ok".into()));
+                }
+                for p in problems {
+                    add("global", p);
+                }
                 g
             }
             Err(e) => {
@@ -1802,5 +1823,35 @@ mod tests {
         ] {
             assert!(joined.contains(want), "missing {want:?} in:\n{joined}");
         }
+    }
+
+    // Requirement: doctor checks
+    #[test]
+    fn doctor_warns_about_global_path_entries() {
+        let f = fixture();
+        assert_eq!(
+            f.app
+                .doctor()
+                .unwrap()
+                .iter()
+                .filter(|x| x.subject == "global")
+                .map(|x| x.message.as_str())
+                .collect::<Vec<_>>(),
+            ["config ok"]
+        );
+        config::write_atomic(
+            &f.app.paths.global_file(),
+            b"[env]\nPATH = \"/state/fnm_multishells/81142_1/bin:/nonexistent:/usr/bin\"\n",
+        )
+        .unwrap();
+        let findings = f.app.doctor().unwrap();
+        let global: Vec<_> = findings.iter().filter(|x| x.subject == "global").collect();
+        assert_eq!(global.len(), 1, "{global:?}");
+        assert_eq!(global[0].severity, Severity::Warn);
+        assert!(
+            global[0]
+                .message
+                .contains("fnm_multishells/81142_1/bin belongs to a single shell session")
+        );
     }
 }

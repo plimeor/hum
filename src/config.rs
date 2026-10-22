@@ -461,7 +461,8 @@ pub fn ensure_global(paths: &Paths, path_env: &str) -> Result<bool> {
          # PATH was captured from the shell that first ran hum.\n\n[env]\n",
     );
     if !path_env.is_empty() {
-        text += &format!("PATH = {}\n", toml_edit::Value::from(path_env));
+        let path = recorded_path(path_env);
+        text += &format!("PATH = {}\n", toml_edit::Value::from(path));
     }
     text += &format!(
         "\n[log]\n# max_size = \"{DEFAULT_LOG_MAX_SIZE_TEXT}\"\n# keep = {DEFAULT_LOG_KEEP}\n"
@@ -469,6 +470,28 @@ pub fn ensure_global(paths: &Paths, path_env: &str) -> Result<bool> {
     fs::create_dir_all(paths.services_dir())?;
     write_atomic(&file, text.as_bytes())?;
     Ok(true)
+}
+
+/// Whether a PATH entry lies in a directory a version manager creates for a
+/// single shell session (fnm's `fnm_multishells/<id>`).
+pub fn is_per_shell_path(entry: &str) -> bool {
+    Path::new(entry)
+        .components()
+        .any(|c| c.as_os_str() == "fnm_multishells")
+}
+
+/// The PATH written into a new global config: each per-shell entry becomes
+/// the directory it resolves to, which keeps the version that shell used
+/// and outlives the session. An entry that does not resolve stays as it is.
+fn recorded_path(path_env: &str) -> String {
+    path_env
+        .split(':')
+        .map(|entry| match fs::canonicalize(entry) {
+            Ok(real) if is_per_shell_path(entry) => real.display().to_string(),
+            _ => entry.to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join(":")
 }
 
 /// Rotation settings: service over global over default.
@@ -793,5 +816,30 @@ mod tests {
         );
         assert!(p.services_dir().is_dir());
         assert!(!ensure_global(&p, "/other").unwrap());
+    }
+
+    // Requirement: Per-shell PATH entries are resolved
+    #[test]
+    fn global_path_resolves_per_shell_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(dir.path()).unwrap();
+        let installation = root.join("fnm/node-versions/v24.21.0/installation");
+        fs::create_dir_all(installation.join("bin")).unwrap();
+        let shells = root.join("state/fnm_multishells");
+        fs::create_dir_all(&shells).unwrap();
+        std::os::unix::fs::symlink(&installation, shells.join("81142_1")).unwrap();
+        let p = Paths::with_home(root.join("home"));
+        let live = shells.join("81142_1/bin");
+        let gone = shells.join("99999_1/bin");
+        let path_env = format!("{}:{}:/usr/bin", live.display(), gone.display());
+        assert!(ensure_global(&p, &path_env).unwrap());
+        assert_eq!(
+            load_global(&p).unwrap().env["PATH"],
+            format!(
+                "{}:{}:/usr/bin",
+                installation.join("bin").display(),
+                gone.display()
+            )
+        );
     }
 }
