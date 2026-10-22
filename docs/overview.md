@@ -1,5 +1,5 @@
 # Project overview
-Updated 2026-10-21
+Updated 2026-10-22
 
 ## What this is
 
@@ -17,16 +17,22 @@ Shipped features are described in `docs/specs/`.
 
 ## Current focus
 
-v1: macOS only (arm64 / x64), all 14 commands. The code and tests are done, and on a Mac it has been confirmed that launchd opens logs with `O_APPEND`, so copytruncate rotation works. What remains is the validation plan on a real Mac:
+v1: macOS only (arm64 / x64), all 14 commands. The code and tests are done, and releases ship through Homebrew (`plimeor/tap`). On a real Mac with 0.1.0-rc.4, these checks pass:
 
-- Build the Rust version and run the real-launchd tests: `cargo test -- --ignored --test-threads=1 launchd::macos`.
-- Local integration: after `hum new sleeper -- sleep 1000`, `ls` shows running; after `kill -9` it is started again within about 10 seconds; after `stop` it is not started again; after `rm` both the plist and the config are gone.
+- The real-launchd tests: `cargo test -- --ignored --test-threads=1 launchd::macos`.
+- Local integration: after `hum new sleeper -- sleep 1000`, `ls` shows running; after `kill -9` it is started again within 10 seconds; after `stop` it is not started again; after `rm` both the plist and the config are gone.
 - Environment: a service run by launchd and the same service run with `hum run` in the foreground see the same environment.
-- Login and upgrades: after logging out and back in, started services come back and stopped ones do not; after upgrading hum with brew, services still restart normally.
+- Upgrades: after upgrading hum with brew, services still restart normally.
+- launchd opens logs with `O_APPEND`, so copytruncate rotation works.
+
+What remains:
+
+- Login and reboot: after logging out and back in, and after a reboot, started services come back and stopped ones do not.
+- `t3 serve` has run as the first real service (`~/.config/hum/services/t3.toml`, registered 2026-10-22) for a full week.
 
 ## Next
 
-Release v0.1.0 once all of the above pass and `t3 server` has run as the first real service for a full week.
+Release v0.1.0 once both remaining checks pass.
 
 ## Non-goals
 
