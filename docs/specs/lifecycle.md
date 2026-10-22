@@ -34,8 +34,5 @@ When `hum new`, `start`, or `restart`, or the automatic restart after a config c
 ### Requirement: launchd records stay bounded
 launchd keeps a permanent per-user record of every job that was ever enabled or disabled, which only root can delete. hum MUST add such a record only when `hum stop` disables a service; `start`, `restart`, `rm`, `apply`, and installing the log rotation job MUST NOT add one for a job that is not disabled.
 
-### Requirement: Launcher link
-Each job's plist MUST run a symbolic link at `~/Library/Application Support/hum/bin/hum (<name>)`, or `hum (log rotation)` for the log rotation job, instead of the hum binary, so macOS lists the job under that name in Login Items. The link MUST point at the hum path, and MUST be deleted together with the job's plist.
-
-### Requirement: hum path behind the launcher
-When a stable path to the current binary exists on `PATH` (such as a package manager's symlink), the launcher link MUST point at that path rather than a versioned path that breaks on upgrade. A hum started through a launcher link MUST take the link's target as its own path.
+### Requirement: hum path in the plist
+When a stable path to the current binary exists on `PATH` (such as a package manager's symlink), the hum path written into the plist MUST be that path rather than a versioned path that breaks on upgrade.

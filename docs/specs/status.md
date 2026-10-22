@@ -14,7 +14,7 @@ Each service MUST be shown in exactly one state: `running`; `disabled` (stopped 
 `hum ls` MUST print one row for every service that has a config file or a hum plist, with the columns NAME, STATE, PID, LAST EXIT, COMMAND; a service whose config file is invalid MUST still be listed, with the error.
 
 ### Requirement: Flag mismatches with launchd
-When what runs does not match the config, `hum ls` MUST mark the service: the plist is missing or outdated, its launcher link is missing or points at a different hum, a plist has no config, the job was loaded from another path, or a running service started before its service config, the global config, or one of its env files last changed, or a running service whose `cwd` path now resolves through a symbolic link that changed after it started. Pointing a symbolic link on a config or env file's path at another file counts as a change to that file. `hum show` MUST say which of these applies.
+When what runs does not match the config, `hum ls` MUST mark the service: the plist is missing or outdated, a plist has no config, the job was loaded from another path, or a running service started before its service config, the global config, or one of its env files last changed, or a running service whose `cwd` path now resolves through a symbolic link that changed after it started. Pointing a symbolic link on a config or env file's path at another file counts as a change to that file. `hum show` MUST say which of these applies.
 
 ### Requirement: Suggested fixes keep stopped services stopped
 When `hum show` or `hum doctor` suggests how to bring a service back in line with its config, the suggestion for a service that `hum stop` stopped MUST NOT start it.

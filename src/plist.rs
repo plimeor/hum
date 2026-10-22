@@ -76,11 +76,7 @@ mod tests {
             "always.plist",
             &Job {
                 label: "hum.t3".into(),
-                program_arguments: vec![
-                    "/Users/me/Library/Application Support/hum/bin/hum (t3)".into(),
-                    "run".into(),
-                    "t3".into(),
-                ],
+                program_arguments: vec!["/opt/homebrew/bin/hum".into(), "run".into(), "t3".into()],
                 run_at_load: true,
                 keep_alive: Some(KeepAlive::Always(true)),
                 standard_out_path: Some("/Users/me/Library/Logs/hum/t3.log".into()),
@@ -97,11 +93,7 @@ mod tests {
             "on-failure.plist",
             &Job {
                 label: "hum.api".into(),
-                program_arguments: vec![
-                    "/Users/me/Library/Application Support/hum/bin/hum (api)".into(),
-                    "run".into(),
-                    "api".into(),
-                ],
+                program_arguments: vec!["/opt/homebrew/bin/hum".into(), "run".into(), "api".into()],
                 run_at_load: true,
                 keep_alive: Some(KeepAlive::OnFailure {
                     successful_exit: false,
@@ -121,7 +113,7 @@ mod tests {
             &Job {
                 label: "hum._rotate".into(),
                 program_arguments: [
-                    "/Users/me/Library/Application Support/hum/bin/hum (log rotation)",
+                    "/opt/homebrew/bin/hum",
                     "logs",
                     "--rotate",
                     "--all",

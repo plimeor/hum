@@ -6,7 +6,7 @@
 	<string>hum.api</string>
 	<key>ProgramArguments</key>
 	<array>
-		<string>/Users/me/Library/Application Support/hum/bin/hum (api)</string>
+		<string>/opt/homebrew/bin/hum</string>
 		<string>run</string>
 		<string>api</string>
 	</array>
