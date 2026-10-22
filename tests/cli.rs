@@ -65,7 +65,7 @@ fn stderr(o: &Output) -> String {
     String::from_utf8_lossy(&o.stderr).into_owned()
 }
 
-// Requirement: New never overwrites, Warnings do not block writes, Created on first run
+// Requirement: New never overwrites, Warnings do not block writes, New records the shell's PATH
 #[test]
 fn new_warns_and_never_overwrites() {
     let h = Home::new();
@@ -81,12 +81,13 @@ fn new_warns_and_never_overwrites() {
     assert!(o.status.success(), "{}", stderr(&o));
     let err = stderr(&o);
     assert!(
-        err.contains("definitely-not-a-command not found in global PATH"),
+        err.contains("definitely-not-a-command not found in the service's PATH"),
         "{err}"
     );
     assert!(err.contains("missing.env does not exist"), "{err}");
-    let global = fs::read_to_string(h.path().join(".config/hum/config.toml")).unwrap();
-    assert!(global.contains("PATH = \"/usr/bin:/bin\""), "{global}");
+    let demo = fs::read_to_string(h.service_file("demo")).unwrap();
+    assert!(demo.contains("PATH = \"/usr/bin:/bin\""), "{demo}");
+    assert!(!h.path().join(".config/hum/config.toml").exists());
 
     let before = fs::read_to_string(h.service_file("demo")).unwrap();
     let o = h.run(&["new", "demo", "--no-start", "--", "true"]);
@@ -97,6 +98,25 @@ fn new_warns_and_never_overwrites() {
         stderr(&o)
     );
     assert_eq!(fs::read_to_string(h.service_file("demo")).unwrap(), before);
+}
+
+// Requirement: New records the shell's PATH
+#[test]
+fn new_keeps_a_path_given_with_env() {
+    let h = Home::new();
+    let o = h.run(&[
+        "new",
+        "demo",
+        "--no-start",
+        "--env",
+        "PATH=/opt/x/bin:/usr/bin",
+        "--",
+        "true",
+    ]);
+    assert!(o.status.success(), "{}", stderr(&o));
+    let demo = fs::read_to_string(h.service_file("demo")).unwrap();
+    assert!(demo.contains("PATH = \"/opt/x/bin:/usr/bin\""), "{demo}");
+    assert!(!demo.contains("/usr/bin:/bin"), "{demo}");
 }
 
 // Requirement: Warnings do not block writes
@@ -152,7 +172,7 @@ fn edits_write_through_symbolic_links() {
     );
 
     let global = h.path().join(".config/hum/config.toml");
-    fs::rename(&global, dotfiles.join("config.toml")).unwrap();
+    fs::write(dotfiles.join("config.toml"), "[log]\n# keep = 3\n").unwrap();
     std::os::unix::fs::symlink("../../dotfiles/config.toml", &global).unwrap();
     let o = h
         .cmd(&["edit", "--global"])

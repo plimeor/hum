@@ -874,8 +874,14 @@ fn check_program(plist_path: &Path) -> Option<(Severity, String)> {
     }
 }
 
-/// Checks the entries of the global PATH.
-fn check_global_path(path: &str) -> Vec<(Severity, String)> {
+/// Checks the PATH a service runs with.
+fn check_path(path: &str) -> Vec<(Severity, String)> {
+    if path.is_empty() {
+        return vec![(
+            Severity::Warn,
+            "no PATH in its environment; launchd gives services none".into(),
+        )];
+    }
     path.split(':')
         .filter(|e| config::is_per_shell_path(e))
         .map(|e| {
@@ -901,22 +907,8 @@ impl App {
             });
         };
         let global = match config::load_global(&self.paths) {
-            Ok(g) if g.env.get("PATH").is_none_or(|p| p.is_empty()) => {
-                let msg = format!(
-                    "no PATH in {} [env]; services get no PATH under launchd",
-                    self.paths.global_file().display()
-                );
-                add("global", (Severity::Warn, msg));
-                g
-            }
             Ok(g) => {
-                let mut problems = check_global_path(&g.env["PATH"]);
-                if problems.is_empty() {
-                    problems.push((Severity::Ok, "config ok".into()));
-                }
-                for p in problems {
-                    add("global", p);
-                }
+                add("global", (Severity::Ok, "config ok".into()));
                 g
             }
             Err(e) => {
@@ -924,7 +916,6 @@ impl App {
                 Default::default()
             }
         };
-        let global_path = global.env.get("PATH").cloned().unwrap_or_default();
 
         let mut configured = vec![];
         for file in self.paths.service_files()? {
@@ -946,13 +937,15 @@ impl App {
                     continue;
                 }
             };
-            let mut problems = vec![];
+            let (env, _) = environ::assemble(&environ::base(), &global, &s, &self.paths.home);
+            let path = env.vars.get("PATH").map_or("", |p| p);
+            let mut problems = check_path(path);
             if let config::Command::Argv(argv) = &s.command
-                && environ::look_path(&argv[0], &global_path).is_none()
+                && environ::look_path(&argv[0], path).is_none()
             {
                 problems.push((
                     Severity::Error,
-                    format!("command {} not found in global PATH", argv[0]),
+                    format!("command {} not found in its PATH", argv[0]),
                 ));
             }
             let cwd = s.resolved_cwd(&self.paths.home);
@@ -1201,7 +1194,7 @@ mod tests {
     fn fixture() -> Fixture {
         let dir = tempfile::tempdir().unwrap();
         let paths = Paths::with_home(dir.path().into());
-        config::ensure_global(&paths, "/usr/bin:/bin").unwrap();
+        config::write_atomic(&paths.global_file(), b"[env]\nPATH = \"/usr/bin:/bin\"\n").unwrap();
         let ld: &'static FakeLd = Box::leak(Box::default());
         Fixture {
             app: App {
@@ -1816,7 +1809,7 @@ mod tests {
             .collect();
         let joined = msgs.join("\n");
         for want in [
-            "not found in global PATH",
+            "not found in its PATH",
             "cwd /nonexistent does not exist",
             "env_file /nonexistent/.env",
             "plist missing",
@@ -1827,31 +1820,37 @@ mod tests {
 
     // Requirement: doctor checks
     #[test]
-    fn doctor_warns_about_global_path_entries() {
+    fn doctor_warns_about_service_path() {
         let f = fixture();
-        assert_eq!(
+        f.write(
+            "shell",
+            "command = [\"true\"]\n[env]\nPATH = \"/state/fnm_multishells/81142_1/bin:/usr/bin\"\n",
+        );
+        f.write("bare", "command = [\"/usr/bin/true\"]\n");
+        let warnings = |name: &str| -> Vec<String> {
             f.app
                 .doctor()
                 .unwrap()
-                .iter()
-                .filter(|x| x.subject == "global")
-                .map(|x| x.message.as_str())
-                .collect::<Vec<_>>(),
-            ["config ok"]
-        );
-        config::write_atomic(
-            &f.app.paths.global_file(),
-            b"[env]\nPATH = \"/state/fnm_multishells/81142_1/bin:/nonexistent:/usr/bin\"\n",
-        )
-        .unwrap();
-        let findings = f.app.doctor().unwrap();
-        let global: Vec<_> = findings.iter().filter(|x| x.subject == "global").collect();
-        assert_eq!(global.len(), 1, "{global:?}");
-        assert_eq!(global[0].severity, Severity::Warn);
+                .into_iter()
+                .filter(|x| x.subject == name && x.severity == Severity::Warn)
+                .map(|x| x.message)
+                .collect()
+        };
+        let shell = warnings("shell");
         assert!(
-            global[0]
-                .message
-                .contains("fnm_multishells/81142_1/bin belongs to a single shell session")
+            shell.iter().any(
+                |m| m.contains("fnm_multishells/81142_1/bin belongs to a single shell session")
+            ),
+            "{shell:?}"
+        );
+        assert!(!warnings("bare").iter().any(|m| m.contains("PATH")));
+
+        config::write_atomic(&f.app.paths.global_file(), b"").unwrap();
+        let bare = warnings("bare");
+        assert!(
+            bare.iter()
+                .any(|m| m.contains("no PATH in its environment")),
+            "{bare:?}"
         );
     }
 }

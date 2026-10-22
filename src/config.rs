@@ -449,27 +449,12 @@ pub fn load_global(paths: &Paths) -> Result<Global> {
     }
 }
 
-/// Creates `config.toml` with the given PATH unless it exists. Reports
-/// whether it was created.
-pub fn ensure_global(paths: &Paths, path_env: &str) -> Result<bool> {
-    let file = paths.global_file();
-    if file.exists() {
-        return Ok(false);
-    }
-    let mut text = String::from(
-        "# hum global config, shared by every service.\n\
-         # PATH was captured from the shell that first ran hum.\n\n[env]\n",
-    );
-    if !path_env.is_empty() {
-        let path = recorded_path(path_env);
-        text += &format!("PATH = {}\n", toml_edit::Value::from(path));
-    }
-    text += &format!(
-        "\n[log]\n# max_size = \"{DEFAULT_LOG_MAX_SIZE_TEXT}\"\n# keep = {DEFAULT_LOG_KEEP}\n"
-    );
-    fs::create_dir_all(paths.services_dir())?;
-    write_atomic(&file, text.as_bytes())?;
-    Ok(true)
+/// What `hum edit --global` starts from when `config.toml` does not exist.
+pub fn global_template() -> String {
+    format!(
+        "# hum global config, shared by every service.\n\n[env]\n\n\
+         [log]\n# max_size = \"{DEFAULT_LOG_MAX_SIZE_TEXT}\"\n# keep = {DEFAULT_LOG_KEEP}\n"
+    )
 }
 
 /// Whether a PATH entry lies in a directory a version manager creates for a
@@ -480,10 +465,10 @@ pub fn is_per_shell_path(entry: &str) -> bool {
         .any(|c| c.as_os_str() == "fnm_multishells")
 }
 
-/// The PATH written into a new global config: each per-shell entry becomes
+/// The PATH `hum new` records for a service: each per-shell entry becomes
 /// the directory it resolves to, which keeps the version that shell used
 /// and outlives the session. An entry that does not resolve stays as it is.
-fn recorded_path(path_env: &str) -> String {
+pub fn captured_path(path_env: &str) -> String {
     path_env
         .split(':')
         .map(|entry| match fs::canonicalize(entry) {
@@ -804,23 +789,15 @@ mod tests {
         assert_eq!(got.restart, Restart::OnFailure);
     }
 
-    // Requirement: Created on first run
     #[test]
-    fn global_is_created_once_with_path() {
-        let dir = tempfile::tempdir().unwrap();
-        let p = Paths::with_home(dir.path().into());
-        assert!(ensure_global(&p, "/opt/homebrew/bin:/usr/bin").unwrap());
-        assert_eq!(
-            load_global(&p).unwrap().env["PATH"],
-            "/opt/homebrew/bin:/usr/bin"
-        );
-        assert!(p.services_dir().is_dir());
-        assert!(!ensure_global(&p, "/other").unwrap());
+    fn global_template_is_valid() {
+        let g = parse_global(&global_template()).unwrap();
+        assert!(g.env.is_empty());
     }
 
-    // Requirement: Per-shell PATH entries are resolved
+    // Requirement: New records the shell's PATH
     #[test]
-    fn global_path_resolves_per_shell_entries() {
+    fn captured_path_resolves_per_shell_entries() {
         let dir = tempfile::tempdir().unwrap();
         let root = fs::canonicalize(dir.path()).unwrap();
         let installation = root.join("fnm/node-versions/v24.21.0/installation");
@@ -828,13 +805,11 @@ mod tests {
         let shells = root.join("state/fnm_multishells");
         fs::create_dir_all(&shells).unwrap();
         std::os::unix::fs::symlink(&installation, shells.join("81142_1")).unwrap();
-        let p = Paths::with_home(root.join("home"));
         let live = shells.join("81142_1/bin");
         let gone = shells.join("99999_1/bin");
         let path_env = format!("{}:{}:/usr/bin", live.display(), gone.display());
-        assert!(ensure_global(&p, &path_env).unwrap());
         assert_eq!(
-            load_global(&p).unwrap().env["PATH"],
+            captured_path(&path_env),
             format!(
                 "{}:{}:/usr/bin",
                 installation.join("bin").display(),

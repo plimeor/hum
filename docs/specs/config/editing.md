@@ -10,14 +10,21 @@ Users create and change service configs with `hum new`, `hum edit`, `hum set`, a
 ### Requirement: Create a service
 `hum new <name> [flags] -- <cmd> [args...]` MUST write the arguments after `--` unchanged as the `command` array, default `cwd` to the current directory, and accept `--cwd`, repeatable `--env K=V` and `--env-file PATH`, and `--restart`; unless `--no-start` is given, it MUST start the service right away.
 
+### Requirement: New records the shell's PATH
+Unless `--env PATH=...` is given, `hum new` MUST write the current shell's `PATH` into the new service's `[env]`, because launchd gives services no usable `PATH`. Each entry that lies in a directory a version manager creates for a single shell session (a path with an `fnm_multishells` component) MUST be written as the directory it resolves to, so the service keeps the version that shell used after the session ends; an entry that does not resolve and every other entry MUST be written unchanged.
+
+#### Scenario: fnm's per-shell node directory
+- **WHEN** the shell's `PATH` starts with `~/.local/state/fnm_multishells/81142_1785983258477/bin`, which resolves to `~/.local/share/fnm/node-versions/v24.21.0/installation/bin`, and the user runs `hum new t3 -- t3 server`
+- **THEN** the `PATH` in `t3.toml` `[env]` starts with `~/.local/share/fnm/node-versions/v24.21.0/installation/bin`, written as an absolute path
+
 ### Requirement: New never overwrites
 When a service of the same name exists, `hum new` MUST fail and MUST NOT change the existing config.
 
 ### Requirement: Warnings do not block writes
-When the first argument of `command` is not found in the global `PATH`, `hum new` MUST warn and still write the config. When an `env_file` does not exist, `hum new`, `edit`, `set`, and `unset` MUST warn and still write the config.
+When the first argument of `command` is not found in the service's `PATH`, `hum new` MUST warn and still write the config. When an `env_file` does not exist, `hum new`, `edit`, `set`, and `unset` MUST warn and still write the config.
 
 ### Requirement: Edit in an editor
-`hum edit <name>` and `hum edit --global` MUST open a temporary copy in `$VISUAL`, falling back to `$EDITOR` and then `vi`; after saving it validates the copy. On failure it MUST show the error and ask whether to edit again, leaving the original file unchanged; a closed stdin counts as no. On success it MUST replace the original file atomically.
+`hum edit <name>` and `hum edit --global` MUST open a temporary copy in `$VISUAL`, falling back to `$EDITOR` and then `vi`; after saving it validates the copy. On failure it MUST show the error and ask whether to edit again, leaving the original file unchanged; a closed stdin counts as no. On success it MUST replace the original file atomically. When `config.toml` does not exist, `hum edit --global` MUST start from a template with empty `[env]` and `[log]` tables, and MUST NOT create the file unless the user changes it.
 
 ### Requirement: Change fields from the command line
 `hum set <name> <key>=<value>...` and `hum unset <name> <key>...` MUST accept only `command`, `cwd`, `env_file`, `restart`, `env.<NAME>`, `log.max_size`, and `log.keep`. An `env_file` value separates several paths with commas. `command` MUST be set through `hum set <name> command -- <cmd> [args...]` and cannot be unset.

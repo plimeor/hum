@@ -10,7 +10,6 @@ macOS only (arm64 / x64). There is no release yet, so install from source; valid
 
 ```console
 $ hum new t3 -- t3 server
-created /Users/me/.config/hum/config.toml with the current shell's PATH
 created /Users/me/.config/hum/services/t3.toml
 t3: started
 $ hum ls
@@ -19,7 +18,7 @@ t3    running  4242  -          t3 server
 $ hum logs t3 -f
 ```
 
-On its first run hum creates the global config and records the current shell's `PATH` in it, because the `PATH` launchd gives services is short.
+`hum new` records the current shell's `PATH` in the service's `[env]`, because launchd gives services no usable `PATH`. Each service keeps the `PATH` it was created with until you change `env.PATH` with `hum set` or `hum edit`.
 
 ## Usage
 
@@ -33,6 +32,7 @@ env_file = [".env"]          # relative to cwd; later files override earlier one
 restart = "always"           # always | on-failure | never
 
 [env]
+PATH = "/opt/homebrew/bin:/usr/bin:/bin"   # recorded by `hum new`
 PORT = "3773"
 
 [log]
@@ -49,7 +49,7 @@ keep = 3
 | `[env]` | `{}` | Values are taken literally, with no expansion |
 | `[log]` | global | `max_size` uses powers of 1024; `keep` is how many old copies to keep |
 
-Unknown fields and illegal values are errors, and an invalid file is never partly applied. The global config, `~/.config/hum/config.toml`, has only `[env]` and `[log]`, shared by every service.
+Unknown fields and illegal values are errors, and an invalid file is never partly applied. The global config, `~/.config/hum/config.toml`, is optional and has only `[env]` and `[log]`, shared by every service; `hum edit --global` creates it.
 
 ### Environment
 

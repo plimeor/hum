@@ -235,16 +235,6 @@ fn dispatch(cli: Cli) -> Result<()> {
         return completion(shell);
     }
     let app = App::new()?;
-    // `hum run` is what launchd invokes, with launchd's short PATH, so it
-    // must not be the one to capture PATH.
-    if !matches!(cli.cmd, Cmd::Run { .. })
-        && config::ensure_global(&app.paths, &std::env::var("PATH").unwrap_or_default())?
-    {
-        eprintln!(
-            "created {} with the current shell's PATH",
-            app.paths.global_file().display()
-        );
-    }
     let ctx = Ctx {
         app,
         json: cli.json,
@@ -662,6 +652,13 @@ impl Ctx {
             config::validate_env_key(k)?;
             vars.insert(k.to_string(), v.to_string());
         }
+        // launchd gives services a short PATH, so record the shell's.
+        if !vars.contains_key("PATH")
+            && let Ok(path) = std::env::var("PATH")
+            && !path.is_empty()
+        {
+            vars.insert("PATH".into(), config::captured_path(&path));
+        }
         let s = Service {
             name,
             command: Command::Argv(command),
@@ -676,9 +673,10 @@ impl Ctx {
         let global = config::load_global(paths)?;
         let mut d = Done::new(&s.name, Outcome::Created);
         let argv0 = &s.argv()[0];
-        if environ::look_path(argv0, global.env.get("PATH").map_or("", |p| p)).is_none() {
+        let (env, _) = environ::assemble(&environ::base(), &global, &s, &paths.home);
+        if environ::look_path(argv0, env.vars.get("PATH").map_or("", |p| p)).is_none() {
             d.warnings.push(format!(
-                "{argv0} not found in global PATH; writing it anyway"
+                "{argv0} not found in the service's PATH; writing it anyway"
             ));
         }
         d.warnings.extend(missing_env_files(&self.app, &s));
@@ -707,6 +705,7 @@ impl Ctx {
                     name.map_or("", |n| n)
                 )
             }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => config::global_template(),
             r => r.with_context(|| path.display().to_string())?,
         };
         let Some(edited) = self.edit_loop(&path, &orig, &*validate)? else {
