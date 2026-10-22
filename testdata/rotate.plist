@@ -6,7 +6,7 @@
 	<string>hum._rotate</string>
 	<key>ProgramArguments</key>
 	<array>
-		<string>/opt/homebrew/bin/hum</string>
+		<string>/Users/me/Library/Application Support/hum/bin/hum (log rotation)</string>
 		<string>logs</string>
 		<string>--rotate</string>
 		<string>--all</string>

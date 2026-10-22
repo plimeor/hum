@@ -31,9 +31,16 @@ pub struct App {
 /// /opt/homebrew/bin/hum) survives upgrades; the resolved binary path does
 /// not, so the symlink wins when it points at this binary.
 pub fn hum_path() -> String {
-    let Ok(exe) = std::env::current_exe() else {
+    let Ok(mut exe) = std::env::current_exe() else {
         return "hum".into();
     };
+    // Under launchd hum runs through a job's launcher link; the hum it
+    // stands for is the link's target.
+    if config::is_launcher(&exe)
+        && let Ok(target) = fs::read_link(&exe)
+    {
+        exe = target;
+    }
     let real = fs::canonicalize(&exe).unwrap_or(exe.clone());
     let path = std::env::var("PATH").unwrap_or_default();
     if let Some(found) = environ::look_path("hum", &path) {
@@ -143,15 +150,19 @@ impl App {
         Some(self.paths.log_file(name).display().to_string())
     }
 
-    /// The plist a service should have.
-    pub fn render_plist(&self, s: &Service) -> Vec<u8> {
-        self.render_plist_with(s, &self.hum_path)
+    fn launcher_path(&self, name: &str) -> String {
+        self.paths.launcher(name).display().to_string()
     }
 
-    fn render_plist_with(&self, s: &Service, hum_path: &str) -> Vec<u8> {
+    /// The plist a service should have.
+    pub fn render_plist(&self, s: &Service) -> Vec<u8> {
         plist::render(&plist::Job {
             label: label(&s.name),
-            program_arguments: vec![hum_path.into(), "run".into(), s.name.to_string()],
+            program_arguments: vec![
+                self.launcher_path(&s.name),
+                "run".into(),
+                s.name.to_string(),
+            ],
             // Login brings a service back unless `hum stop` disabled it.
             run_at_load: true,
             keep_alive: match s.restart {
@@ -168,11 +179,7 @@ impl App {
     }
 
     fn render_rotate_plist(&self) -> Vec<u8> {
-        self.render_rotate_plist_with(&self.hum_path)
-    }
-
-    fn render_rotate_plist_with(&self, hum_path: &str) -> Vec<u8> {
-        let mut args = vec![hum_path.to_string()];
+        let mut args = vec![self.launcher_path(ROTATE_NAME)];
         args.extend(ROTATE_ARGS.map(String::from));
         plist::render(&plist::Job {
             label: label(ROTATE_NAME),
@@ -184,8 +191,29 @@ impl App {
         })
     }
 
-    /// Writes a plist file if it differs; reports whether it changed.
+    /// Points a job's launcher link at this hum. launchd follows the link
+    /// at every start, so a changed target needs no reload.
+    fn write_launcher(&self, name: &str) -> Result<()> {
+        let link = self.paths.launcher(name);
+        if fs::read_link(&link).is_ok_and(|t| t == Path::new(&self.hum_path)) {
+            return Ok(());
+        }
+        fs::create_dir_all(&self.paths.launcher_dir)?;
+        let tmp = self
+            .paths
+            .launcher_dir
+            .join(format!(".{}.tmp", config::launcher_name(name)));
+        remove_if_exists(&tmp)?;
+        std::os::unix::fs::symlink(&self.hum_path, &tmp)
+            .with_context(|| format!("creating {}", tmp.display()))?;
+        fs::rename(&tmp, &link).with_context(|| format!("writing {}", link.display()))?;
+        Ok(())
+    }
+
+    /// Writes a job's launcher and its plist file if it differs; reports
+    /// whether the plist changed.
     fn write_plist(&self, name: &str, data: &[u8]) -> Result<bool> {
+        self.write_launcher(name)?;
         let path = self.paths.plist_file(name);
         if fs::read(&path).is_ok_and(|cur| cur == data) {
             return Ok(false);
@@ -272,6 +300,7 @@ impl App {
         // A future service with this name must not inherit `hum stop`.
         self.clear_disabled(&label)?;
         remove_if_exists(&plist)?;
+        remove_if_exists(&self.paths.launcher(name))?;
         if !keep_config {
             remove_if_exists(&cfg)?;
             let log = self.paths.log_file(name);
@@ -351,6 +380,7 @@ impl App {
     fn remove_rotate_job(&self) -> Result<()> {
         self.ld.bootout(&label(ROTATE_NAME))?;
         remove_if_exists(&self.paths.plist_file(ROTATE_NAME))?;
+        remove_if_exists(&self.paths.launcher(ROTATE_NAME))?;
         remove_if_exists(&self.paths.log_file(ROTATE_NAME))
     }
 
@@ -389,31 +419,31 @@ impl App {
 
     /// Why launchd's definition of the job does not match the config.
     fn plist_reason(&self, s: &Service, st: &Status) -> Option<String> {
-        self.definition_reason(&s.name, st, |prog| self.render_plist_with(s, prog))
+        self.definition_reason(&s.name, st, &self.render_plist(s))
     }
 
-    /// Why the job's plist on disk, or the definition launchd loaded, is
-    /// not what `render` produces with this hum's path.
-    fn definition_reason(
-        &self,
-        name: &str,
-        st: &Status,
-        render: impl Fn(&str) -> Vec<u8>,
-    ) -> Option<String> {
+    /// Why the job's plist on disk, its launcher, or the definition
+    /// launchd loaded is not what this hum would install.
+    fn definition_reason(&self, name: &str, st: &Status, want: &[u8]) -> Option<String> {
         let plist_path = self.paths.plist_file(name);
         let Ok(data) = fs::read(&plist_path) else {
             return Some("plist missing".into());
         };
-        if data != render(&self.hum_path) {
-            // Name the hum path when it is the only difference: running a
-            // different hum binary (a dev build) makes every plist differ.
-            if let Some(prog) = plist::program(&data)
-                && prog != self.hum_path
-                && data == render(&prog)
-            {
-                return Some(format!("plist runs {prog}, this hum is {}", self.hum_path));
-            }
+        if data != want {
             return Some("plist outdated".into());
+        }
+        // Running a different hum binary (a dev build) leaves every plist
+        // as it is and changes only where the launchers point.
+        match fs::read_link(self.paths.launcher(name)) {
+            Err(_) => return Some("launcher missing".into()),
+            Ok(t) if t != Path::new(&self.hum_path) => {
+                return Some(format!(
+                    "launcher runs {}, this hum is {}",
+                    t.display(),
+                    self.hum_path
+                ));
+            }
+            Ok(_) => {}
         }
         match &st.path {
             Some(p) if st.loaded && Path::new(p) != plist_path => Some(format!("loaded from {p}")),
@@ -446,8 +476,7 @@ impl App {
                 "log rotation job not installed",
             ));
         }
-        if let Some(reason) =
-            self.definition_reason(ROTATE_NAME, &st, |prog| self.render_rotate_plist_with(prog))
+        if let Some(reason) = self.definition_reason(ROTATE_NAME, &st, &self.render_rotate_plist())
         {
             return Ok(action(ActionKind::Update, &reason));
         }
@@ -822,7 +851,8 @@ impl App {
             ActionKind::Unregister => {
                 self.ld.bootout(&label)?;
                 self.clear_disabled(&label)?;
-                remove_if_exists(&self.paths.plist_file(name))
+                remove_if_exists(&self.paths.plist_file(name))?;
+                remove_if_exists(&self.paths.launcher(name))
             }
         }
     }
@@ -857,16 +887,18 @@ fn check_program(plist_path: &Path) -> Option<(Severity, String)> {
             format!("cannot read ProgramArguments from {}", plist_path.display()),
         ));
     };
+    // The plist runs a launcher link; the hum path is where it points.
+    let hum = fs::read_link(&prog).map_or(prog.clone(), |t| t.display().to_string());
     if environ::look_path(&prog, "").is_none() {
         Some((
             Severity::Error,
             format!("plist runs {prog}, which is missing or not executable; run `hum apply`"),
         ))
-    } else if prog.contains("/Cellar/") {
+    } else if hum.contains("/Cellar/") {
         Some((
             Severity::Warn,
             format!(
-                "plist runs versioned path {prog}; it breaks on upgrade (put hum on PATH and run `hum apply`)"
+                "plist runs versioned path {hum}; it breaks on upgrade (put hum on PATH and run `hum apply`)"
             ),
         ))
     } else {
@@ -1598,7 +1630,7 @@ mod tests {
         };
         assert!(
             rotate(&dev).contains(
-                &"update plist runs /opt/homebrew/bin/hum, this hum is /src/hum/target/release/hum"
+                &"update launcher runs /opt/homebrew/bin/hum, this hum is /src/hum/target/release/hum"
                     .to_string()
             ),
             "{:?}",
@@ -1631,6 +1663,38 @@ mod tests {
         assert!(a.plan().unwrap().0.is_empty());
     }
 
+    // Requirement: Launcher link, rm
+    #[test]
+    fn jobs_run_through_named_launcher_links() {
+        let f = fixture();
+        let a = &f.app;
+        f.write("x", r#"command = ["sleep", "1"]"#);
+        a.start(&n("x")).unwrap();
+        let dir = a.paths.home.join("Library/Application Support/hum/bin");
+        for (name, file) in [("x", "hum (x)"), (ROTATE_NAME, "hum (log rotation)")] {
+            let link = dir.join(file);
+            assert_eq!(
+                fs::read_link(&link).unwrap(),
+                Path::new("/opt/homebrew/bin/hum")
+            );
+            let plist = fs::read(a.paths.plist_file(name)).unwrap();
+            assert_eq!(plist::program(&plist).unwrap(), link.display().to_string());
+        }
+
+        fs::remove_file(dir.join("hum (x)")).unwrap();
+        let s = config::load_service(&a.paths, &n("x")).unwrap();
+        assert_eq!(
+            a.sync_reason(&s, &f.status("x")).unwrap(),
+            "launcher missing"
+        );
+        a.restart(&n("x")).unwrap();
+        assert!(dir.join("hum (x)").is_symlink());
+
+        a.remove(&n("x"), false).unwrap();
+        assert!(!dir.join("hum (x)").is_symlink());
+        assert!(!dir.join("hum (log rotation)").is_symlink());
+    }
+
     // Requirement: Flag mismatches with launchd
     #[test]
     fn a_different_hum_binary_is_named_as_the_reason() {
@@ -1646,7 +1710,7 @@ mod tests {
         let reason = dev.sync_reason(&s, &f.status("x")).unwrap();
         assert_eq!(
             reason,
-            "plist runs /opt/homebrew/bin/hum, this hum is /src/hum/target/release/hum"
+            "launcher runs /opt/homebrew/bin/hum, this hum is /src/hum/target/release/hum"
         );
         assert_eq!(dev.plan().unwrap().0[0].reason, reason);
     }

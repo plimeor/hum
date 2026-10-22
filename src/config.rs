@@ -81,6 +81,22 @@ pub fn label(name: &str) -> String {
     format!("{LABEL_PREFIX}{name}")
 }
 
+/// The file name of a job's launcher link: `hum (<name>)`.
+pub fn launcher_name(name: &str) -> String {
+    if name == ROTATE_NAME {
+        "hum (log rotation)".into()
+    } else {
+        format!("hum ({name})")
+    }
+}
+
+/// Whether `path` is named like a launcher link.
+pub fn is_launcher(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|n| n.starts_with("hum (") && n.ends_with(')'))
+}
+
 /// Every location hum reads or writes.
 #[derive(Clone, Debug)]
 pub struct Paths {
@@ -89,6 +105,8 @@ pub struct Paths {
     pub config_dir: PathBuf,
     pub launch_agents: PathBuf,
     pub log_dir: PathBuf,
+    /// Where each job's launcher link lives.
+    pub launcher_dir: PathBuf,
 }
 
 impl Paths {
@@ -117,6 +135,7 @@ impl Paths {
             config_dir: home.join(".config/hum"),
             launch_agents: home.join("Library/LaunchAgents"),
             log_dir: home.join("Library/Logs/hum"),
+            launcher_dir: home.join("Library/Application Support/hum/bin"),
             home,
         }
     }
@@ -135,6 +154,12 @@ impl Paths {
 
     pub fn plist_file(&self, name: &str) -> PathBuf {
         self.launch_agents.join(format!("{}.plist", label(name)))
+    }
+
+    /// The link a job's plist runs instead of hum itself. macOS lists the
+    /// job in Login Items under the link's file name.
+    pub fn launcher(&self, name: &str) -> PathBuf {
+        self.launcher_dir.join(launcher_name(name))
     }
 
     pub fn log_file(&self, name: &str) -> PathBuf {
@@ -787,6 +812,15 @@ mod tests {
         assert_eq!(got.env, s.env);
         assert_eq!(got.env_file, s.env_file);
         assert_eq!(got.restart, Restart::OnFailure);
+    }
+
+    // Requirement: Launcher link
+    #[test]
+    fn launcher_names() {
+        assert_eq!(launcher_name("t3"), "hum (t3)");
+        assert_eq!(launcher_name(ROTATE_NAME), "hum (log rotation)");
+        assert!(is_launcher(Path::new("/x/hum (t3)")));
+        assert!(!is_launcher(Path::new("/opt/homebrew/bin/hum")));
     }
 
     #[test]
