@@ -388,7 +388,12 @@ mod macos {
             "unknown job"
         );
         ld.bootstrap(&j.plist).unwrap();
-        wait_for("running", || ld.status(&j.label).unwrap().running);
+        // For a few milliseconds after launchd reports the pid, the process
+        // is still being spawned and its start time cannot be read.
+        wait_for("running with a start time", || {
+            let st = ld.status(&j.label).unwrap();
+            st.running && st.started_at.is_some()
+        });
         let st = ld.status(&j.label).unwrap();
         assert!(st.loaded && st.pid.is_some());
         assert_eq!(st.path.as_deref(), Some(&*j.plist.to_string_lossy()));
