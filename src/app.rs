@@ -20,67 +20,13 @@ pub const ROTATE_INTERVAL: u64 = 30;
 /// Arguments the rotate job passes to hum; a CLI test parses them.
 pub const ROTATE_ARGS: [&str; 4] = ["logs", "--rotate", "--all", "--if-oversize"];
 
-/// The plist variable naming the hum the launcher copy hands over to.
-pub const EXEC_VAR: &str = "HUM_EXEC";
-
 pub struct App {
     pub paths: Paths,
     pub ld: Box<dyn Manager>,
-    /// The hum every job hands over to, written into plists as `HUM_EXEC`.
-    pub hum_path: String,
     /// The running binary, which the launcher copy is made from.
     pub hum_binary: PathBuf,
-}
-
-/// The hum a launcher copy started by launchd should become: the one in
-/// `HUM_EXEC`, unless that is this binary or cannot be run.
-pub fn handover_target(exec_var: Option<&std::ffi::OsStr>, current: &Path) -> Option<PathBuf> {
-    let target = PathBuf::from(exec_var?);
-    let real = fs::canonicalize(&target).ok()?;
-    let runnable = environ::look_path(&target.to_string_lossy(), "").is_some();
-    (runnable && real != current).then_some(target)
-}
-
-/// Hands this process over to the hum in `HUM_EXEC`, with the same
-/// arguments. A process keeps the identity launchd started it with across
-/// exec, so grants stay tied to the launcher copy while the latest hum
-/// runs. When the hand-over is not possible the copy carries on itself.
-pub fn hand_over() {
-    let exec_var = std::env::var_os(EXEC_VAR);
-    let current = std::env::current_exe()
-        .and_then(fs::canonicalize)
-        .unwrap_or_default();
-    let Some(target) = handover_target(exec_var.as_deref(), &current) else {
-        return;
-    };
-    use std::os::unix::process::CommandExt;
-    let err = std::process::Command::new(&target)
-        .args(std::env::args_os().skip(1))
-        .env_remove(EXEC_VAR)
-        .exec();
-    eprintln!(
-        "hum: handing over to {}: {err}; carrying on as {}",
-        target.display(),
-        current.display()
-    );
-}
-
-/// The path launchd should run. A package manager symlink on PATH (e.g.
-/// /opt/homebrew/bin/hum) survives upgrades; the resolved binary path does
-/// not, so the symlink wins when it points at this binary.
-pub fn hum_path() -> String {
-    let Ok(exe) = std::env::current_exe() else {
-        return "hum".into();
-    };
-    let real = fs::canonicalize(&exe).unwrap_or(exe.clone());
-    let path = std::env::var("PATH").unwrap_or_default();
-    if let Some(found) = environ::look_path("hum", &path) {
-        let found = std::path::absolute(found).unwrap_or_default();
-        if fs::canonicalize(&found).is_ok_and(|r| r == real) {
-            return found.display().to_string();
-        }
-    }
-    exe.display().to_string()
+    /// Whether the launcher copy matches `hum_binary`, once known.
+    launcher_current: std::cell::Cell<Option<bool>>,
 }
 
 fn remove_if_exists(path: &Path) -> Result<()> {
@@ -173,10 +119,10 @@ impl App {
         Ok(App {
             paths: Paths::from_env()?,
             ld: crate::launchd::new(),
-            hum_path: hum_path(),
             hum_binary: std::env::current_exe()
                 .and_then(fs::canonicalize)
                 .unwrap_or_default(),
+            launcher_current: Default::default(),
         })
     }
 
@@ -188,20 +134,11 @@ impl App {
         self.paths.launcher().display().to_string()
     }
 
-    fn exec_env(hum_path: &str) -> BTreeMap<String, String> {
-        [(EXEC_VAR.to_string(), hum_path.to_string())].into()
-    }
-
     /// The plist a service should have.
     pub fn render_plist(&self, s: &Service) -> Vec<u8> {
-        self.render_plist_with(s, &self.hum_path)
-    }
-
-    fn render_plist_with(&self, s: &Service, hum_path: &str) -> Vec<u8> {
         plist::render(&plist::Job {
             label: label(&s.name),
             program_arguments: vec![self.launcher_path(), "run".into(), s.name.to_string()],
-            environment_variables: Self::exec_env(hum_path),
             // Login brings a service back unless `hum stop` disabled it.
             run_at_load: true,
             keep_alive: match s.restart {
@@ -218,16 +155,11 @@ impl App {
     }
 
     fn render_rotate_plist(&self) -> Vec<u8> {
-        self.render_rotate_plist_with(&self.hum_path)
-    }
-
-    fn render_rotate_plist_with(&self, hum_path: &str) -> Vec<u8> {
         let mut args = vec![self.launcher_path()];
         args.extend(ROTATE_ARGS.map(String::from));
         plist::render(&plist::Job {
             label: label(ROTATE_NAME),
             program_arguments: args,
-            environment_variables: Self::exec_env(hum_path),
             start_interval: Some(ROTATE_INTERVAL),
             standard_out_path: self.log_path(ROTATE_NAME),
             standard_error_path: self.log_path(ROTATE_NAME),
@@ -235,15 +167,31 @@ impl App {
         })
     }
 
+    /// Whether the launcher copy is the running hum.
+    fn launcher_is_current(&self) -> bool {
+        if let Some(known) = self.launcher_current.get() {
+            return known;
+        }
+        let copy = self.paths.launcher();
+        let same_size = match (fs::metadata(&copy), fs::metadata(&self.hum_binary)) {
+            (Ok(a), Ok(b)) => a.len() == b.len(),
+            _ => false,
+        };
+        let current = same_size
+            && matches!((fs::read(&copy), fs::read(&self.hum_binary)), (Ok(a), Ok(b)) if a == b);
+        self.launcher_current.set(Some(current));
+        current
+    }
+
     /// Makes the launcher copy a copy of the running hum. It is replaced
     /// in place, since a replacement at another path loses its grants.
     fn write_launcher(&self) -> Result<()> {
+        if self.launcher_is_current() {
+            return Ok(());
+        }
         let copy = self.paths.launcher();
         let data = fs::read(&self.hum_binary)
             .with_context(|| format!("reading {}", self.hum_binary.display()))?;
-        if fs::read(&copy).is_ok_and(|cur| cur == data) {
-            return Ok(());
-        }
         fs::create_dir_all(&self.paths.support_dir)?;
         let mut tmp = tempfile::NamedTempFile::new_in(&self.paths.support_dir)?;
         std::io::Write::write_all(&mut tmp, &data)?;
@@ -252,6 +200,7 @@ impl App {
             .set_permissions(fs::Permissions::from_mode(0o755))?;
         tmp.persist(&copy)
             .with_context(|| format!("writing {}", copy.display()))?;
+        self.launcher_current.set(Some(true));
         Ok(())
     }
 
@@ -425,6 +374,7 @@ impl App {
         self.ld.bootout(&label(ROTATE_NAME))?;
         remove_if_exists(&self.paths.plist_file(ROTATE_NAME))?;
         remove_if_exists(&self.paths.launcher())?;
+        self.launcher_current.set(Some(false));
         remove_if_exists(&self.paths.log_file(ROTATE_NAME))
     }
 
@@ -463,31 +413,26 @@ impl App {
 
     /// Why launchd's definition of the job does not match the config.
     fn plist_reason(&self, s: &Service, st: &Status) -> Option<String> {
-        self.definition_reason(&s.name, st, |prog| self.render_plist_with(s, prog))
+        self.definition_reason(&s.name, st, &self.render_plist(s))
     }
 
-    /// Why the job's plist on disk, or the definition launchd loaded, is
-    /// not what `render` produces with this hum's path.
-    fn definition_reason(
-        &self,
-        name: &str,
-        st: &Status,
-        render: impl Fn(&str) -> Vec<u8>,
-    ) -> Option<String> {
+    /// Why the job's plist on disk, the launcher copy it runs, or the
+    /// definition launchd loaded is not what this hum would install.
+    fn definition_reason(&self, name: &str, st: &Status, want: &[u8]) -> Option<String> {
         let plist_path = self.paths.plist_file(name);
         let Ok(data) = fs::read(&plist_path) else {
             return Some("plist missing".into());
         };
-        if data != render(&self.hum_path) {
-            // Name the hum path when it is the only difference: running a
-            // different hum binary (a dev build) makes every plist differ.
-            if let Some(prog) = plist::env_var(&data, EXEC_VAR)
-                && prog != self.hum_path
-                && data == render(&prog)
-            {
-                return Some(format!("plist runs {prog}, this hum is {}", self.hum_path));
-            }
+        if data != want {
             return Some("plist outdated".into());
+        }
+        // A brew upgrade or a dev build leaves every plist as it is and
+        // changes only which hum the copy should be.
+        if !self.launcher_is_current() {
+            return Some(format!(
+                "launcher copy is not this hum ({})",
+                self.hum_binary.display()
+            ));
         }
         match &st.path {
             Some(p) if st.loaded && Path::new(p) != plist_path => Some(format!("loaded from {p}")),
@@ -520,8 +465,7 @@ impl App {
                 "log rotation job not installed",
             ));
         }
-        if let Some(reason) =
-            self.definition_reason(ROTATE_NAME, &st, |prog| self.render_rotate_plist_with(prog))
+        if let Some(reason) = self.definition_reason(ROTATE_NAME, &st, &self.render_rotate_plist())
         {
             return Ok(action(ActionKind::Update, &reason));
         }
@@ -922,43 +866,21 @@ pub struct Finding {
 /// Logs this many times larger than max_size mean rotation is not running.
 const OVERSIZE_FACTOR: u64 = 2;
 
-/// Checks the hum path a plist runs.
-fn check_program(plist_path: &Path) -> Vec<(Severity, String)> {
-    let Ok(data) = fs::read(plist_path) else {
-        return vec![];
-    };
+/// Checks the program a plist runs.
+fn check_program(plist_path: &Path) -> Option<(Severity, String)> {
+    let data = fs::read(plist_path).ok()?;
     let Some(prog) = plist::program(&data) else {
-        return vec![(
+        return Some((
             Severity::Error,
             format!("cannot read ProgramArguments from {}", plist_path.display()),
-        )];
+        ));
     };
-    if environ::look_path(&prog, "").is_none() {
-        return vec![(
+    environ::look_path(&prog, "").is_none().then(|| {
+        (
             Severity::Error,
             format!("plist runs {prog}, which is missing or not executable; run `hum apply`"),
-        )];
-    }
-    let Some(hum) = plist::env_var(&data, EXEC_VAR) else {
-        return vec![];
-    };
-    if environ::look_path(&hum, "").is_none() {
-        vec![(
-            Severity::Warn,
-            format!(
-                "plist hands over to {hum}, which is missing or not executable, so {prog} runs instead; run `hum apply`"
-            ),
-        )]
-    } else if hum.contains("/Cellar/") {
-        vec![(
-            Severity::Warn,
-            format!(
-                "plist runs versioned path {hum}; it breaks on upgrade (put hum on PATH and run `hum apply`)"
-            ),
-        )]
-    } else {
-        vec![]
-    }
+        )
+    })
 }
 
 /// Checks the PATH a service runs with.
@@ -1102,7 +1024,7 @@ impl App {
                     ),
                 );
             }
-            for f in check_program(&rp) {
+            if let Some(f) = check_program(&rp) {
                 add(ROTATE_NAME, f);
             }
         }
@@ -1289,8 +1211,8 @@ mod tests {
             app: App {
                 paths,
                 ld: Box::new(ld),
-                hum_path: "/opt/homebrew/bin/hum".into(),
                 hum_binary,
+                launcher_current: Default::default(),
             },
             ld,
             _dir: dir,
@@ -1302,6 +1224,17 @@ mod tests {
     }
 
     impl Fixture {
+        /// Another hum binary over the same home and launchd.
+        fn dev_build(&self) -> App {
+            let hum_binary = self._dir.path().join("dev-hum");
+            fs::write(&hum_binary, b"hum 2").unwrap();
+            App {
+                paths: self.app.paths.clone(),
+                ld: Box::new(self.ld),
+                hum_binary,
+                launcher_current: Default::default(),
+            }
+        }
         fn write(&self, name: &str, body: &str) {
             config::write_atomic(&self.app.paths.service_file(name), body.as_bytes()).unwrap();
         }
@@ -1681,20 +1614,12 @@ mod tests {
         a.start(&n("x")).unwrap();
         assert!(rotate(a).is_empty());
 
-        let dev = App {
-            paths: a.paths.clone(),
-            ld: Box::new(f.ld),
-            hum_path: "/src/hum/target/release/hum".into(),
-            hum_binary: PathBuf::new(),
-        };
-        assert!(
-            rotate(&dev).contains(
-                &"update plist runs /opt/homebrew/bin/hum, this hum is /src/hum/target/release/hum"
-                    .to_string()
-            ),
-            "{:?}",
-            rotate(&dev)
+        let dev = f.dev_build();
+        let reason = format!(
+            "update launcher copy is not this hum ({})",
+            dev.hum_binary.display()
         );
+        assert!(rotate(&dev).contains(&reason), "{:?}", rotate(&dev));
 
         f.ld.bootout(&label(ROTATE_NAME)).unwrap();
         assert_eq!(rotate(a), ["register log rotation job not loaded"]);
@@ -1739,48 +1664,13 @@ mod tests {
         for name in ["x", ROTATE_NAME] {
             let plist = fs::read(a.paths.plist_file(name)).unwrap();
             assert_eq!(plist::program(&plist).unwrap(), copy.display().to_string());
-            assert_eq!(
-                plist::env_var(&plist, EXEC_VAR).unwrap(),
-                "/opt/homebrew/bin/hum"
-            );
         }
 
-        fs::write(&a.hum_binary, b"hum 2").unwrap();
-        a.restart(&n("x")).unwrap();
+        f.dev_build().restart(&n("x")).unwrap();
         assert_eq!(fs::read(&copy).unwrap(), b"hum 2", "replaced in place");
 
         a.remove(&n("x"), false).unwrap();
         assert!(!copy.exists(), "removed with the last job");
-    }
-
-    // Requirement: Launcher copy
-    #[test]
-    fn the_copy_hands_over_to_another_runnable_hum() {
-        use std::os::unix::fs::PermissionsExt;
-        let dir = tempfile::tempdir().unwrap();
-        let (copy, hum) = (dir.path().join("copy"), dir.path().join("hum"));
-        for p in [&copy, &hum] {
-            fs::write(p, b"").unwrap();
-            fs::set_permissions(p, fs::Permissions::from_mode(0o755)).unwrap();
-        }
-        let copy = fs::canonicalize(&copy).unwrap();
-        let var = |p: &Path| Some(p.as_os_str().to_owned());
-        assert_eq!(
-            handover_target(var(&hum).as_deref(), &copy),
-            Some(hum.clone())
-        );
-        assert_eq!(handover_target(None, &copy), None, "no HUM_EXEC");
-        assert_eq!(
-            handover_target(var(&copy).as_deref(), &copy),
-            None,
-            "itself"
-        );
-        let gone = dir.path().join("gone");
-        assert_eq!(
-            handover_target(var(&gone).as_deref(), &copy),
-            None,
-            "missing"
-        );
     }
 
     // Requirement: Flag mismatches with launchd
@@ -1789,19 +1679,26 @@ mod tests {
         let f = fixture();
         f.write("x", r#"command = ["sleep", "1"]"#);
         f.app.start(&n("x")).unwrap();
-        let dev = App {
-            paths: f.app.paths.clone(),
-            ld: Box::new(f.ld),
-            hum_path: "/src/hum/target/release/hum".into(),
-            hum_binary: PathBuf::new(),
-        };
+        let dev = f.dev_build();
         let s = config::load_service(&dev.paths, &n("x")).unwrap();
         let reason = dev.sync_reason(&s, &f.status("x")).unwrap();
         assert_eq!(
             reason,
-            "plist runs /opt/homebrew/bin/hum, this hum is /src/hum/target/release/hum"
+            format!(
+                "launcher copy is not this hum ({})",
+                dev.hum_binary.display()
+            )
         );
         assert_eq!(dev.plan().unwrap().0[0].reason, reason);
+
+        // apply makes the copy that hum, without a restart.
+        let pid = f.status("x").pid;
+        for act in &dev.plan().unwrap().0 {
+            dev.apply_action(act).unwrap();
+        }
+        assert_eq!(fs::read(dev.paths.launcher()).unwrap(), b"hum 2");
+        assert!(dev.sync_reason(&s, &f.status("x")).is_none());
+        assert_eq!(f.status("x").pid, pid);
     }
 
     // Requirement: show output, Environment values masked by default

@@ -10,11 +10,6 @@
 		<string>run</string>
 		<string>t3</string>
 	</array>
-	<key>EnvironmentVariables</key>
-	<dict>
-		<key>HUM_EXEC</key>
-		<string>/opt/homebrew/bin/hum</string>
-	</dict>
 	<key>RunAtLoad</key>
 	<true/>
 	<key>KeepAlive</key>

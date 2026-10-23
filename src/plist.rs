@@ -1,8 +1,6 @@
 //! Renders launchd property lists. Output is deterministic, so comparing
 //! bytes tells whether a plist on disk is current.
 
-use std::collections::BTreeMap;
-
 use serde::{Deserialize, Serialize};
 
 /// One launchd job.
@@ -11,8 +9,6 @@ use serde::{Deserialize, Serialize};
 pub struct Job {
     pub label: String,
     pub program_arguments: Vec<String>,
-    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
-    pub environment_variables: BTreeMap<String, String>,
     pub run_at_load: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub keep_alive: Option<KeepAlive>,
@@ -41,29 +37,18 @@ pub fn render(job: &Job) -> Vec<u8> {
     out
 }
 
-#[derive(Deserialize)]
-#[serde(rename_all = "PascalCase")]
-struct Parsed {
-    program_arguments: Vec<String>,
-    #[serde(default)]
-    environment_variables: BTreeMap<String, String>,
-}
-
 /// `ProgramArguments[0]` of a plist.
 pub fn program(data: &[u8]) -> Option<String> {
-    plist::from_bytes::<Parsed>(data)
+    #[derive(Deserialize)]
+    #[serde(rename_all = "PascalCase")]
+    struct Args {
+        program_arguments: Vec<String>,
+    }
+    plist::from_bytes::<Args>(data)
         .ok()?
         .program_arguments
         .into_iter()
         .next()
-}
-
-/// The value of environment variable `key` in a plist.
-pub fn env_var(data: &[u8], key: &str) -> Option<String> {
-    plist::from_bytes::<Parsed>(data)
-        .ok()?
-        .environment_variables
-        .remove(key)
 }
 
 #[cfg(test)]
@@ -96,7 +81,6 @@ mod tests {
                     "run".into(),
                     "t3".into(),
                 ],
-                environment_variables: [("HUM_EXEC".into(), "/opt/homebrew/bin/hum".into())].into(),
                 run_at_load: true,
                 keep_alive: Some(KeepAlive::Always(true)),
                 standard_out_path: Some("/Users/me/Library/Logs/hum/t3.log".into()),
@@ -118,7 +102,6 @@ mod tests {
                     "run".into(),
                     "api".into(),
                 ],
-                environment_variables: [("HUM_EXEC".into(), "/opt/homebrew/bin/hum".into())].into(),
                 run_at_load: true,
                 keep_alive: Some(KeepAlive::OnFailure {
                     successful_exit: false,
@@ -146,7 +129,6 @@ mod tests {
                 ]
                 .map(String::from)
                 .into(),
-                environment_variables: [("HUM_EXEC".into(), "/opt/homebrew/bin/hum".into())].into(),
                 start_interval: Some(30),
                 ..Default::default()
             },
