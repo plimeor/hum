@@ -1,9 +1,9 @@
 # Project overview
-Updated 2026-10-22
+Updated 2026-10-23
 
 ## What this is
 
-hum is a macOS CLI written in Rust that registers long-running background commands (such as `t3 server`) as launchd services and manages them through TOML files in one directory.
+hum is a macOS CLI written in Rust that registers long-running background commands (such as `t3 serve`) as launchd services and manages them through TOML files in one directory.
 
 ## Principles
 
@@ -17,18 +17,19 @@ Shipped features are described in `docs/specs/`.
 
 ## Current focus
 
-v1: macOS only (arm64 / x64), all 14 commands. The code and tests are done, and releases ship through Homebrew (`plimeor/tap`). On a real Mac with 0.1.0-rc.4, these checks pass:
+v1: macOS only (arm64 / x64), all 14 commands. The code and tests are done. Releases ship through Homebrew (`plimeor/tap`), signed with a Developer ID certificate, and every plist runs a copy of hum at a fixed path so privacy grants outlast upgrades; after `brew upgrade`, `hum apply` refreshes the copy. On a real Mac these checks pass:
 
 - The real-launchd tests: `cargo test -- --ignored --test-threads=1 launchd::macos`.
 - Local integration: after `hum new sleeper -- sleep 1000`, `ls` shows running; after `kill -9` it is started again within 10 seconds; after `stop` it is not started again; after `rm` both the plist and the config are gone.
 - Environment: a service run by launchd and the same service run with `hum run` in the foreground see the same environment.
-- Upgrades: after upgrading hum with brew, services still restart normally.
+- Upgrades: after `brew upgrade` and `hum apply`, services restart normally on the new version.
+- Privacy grants: after upgrading 0.1.0-rc.8 to rc.9 and running `hum apply`, a service reads `~/Documents` without macOS asking again.
 - launchd opens logs with `O_APPEND`, so copytruncate rotation works.
 
 What remains:
 
 - Login and reboot: after logging out and back in, and after a reboot, started services come back and stopped ones do not.
-- `t3 serve` has run as the first real service (`~/.config/hum/services/t3.toml`, registered 2026-10-22) for a full week.
+- `t3 serve` has run as the first real service (`~/.config/hum/services/t3.toml`, registered 2026-10-22) for a full week, through 2026-10-29.
 
 ## Next
 

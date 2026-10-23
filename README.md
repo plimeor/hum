@@ -4,17 +4,17 @@ Run long-running commands as macOS launchd services, configured by TOML files in
 
 Each `<name>.toml` under `services/` is one service, named after its file. launchd keeps services alive, restarts them after a crash, and starts them at login; hum has no daemon of its own. launchd starts `hum run <name>`, and you debug in the foreground with the same command, so a service behaves the same both ways. Change the command, working directory, or environment and `hum restart` picks it up; nothing needs re-registering.
 
-macOS only (arm64 / x64). There is no release yet, so install from source; validation on a Mac is still in progress.
+macOS only (arm64 / x64). Install it with Homebrew: `brew install plimeor/tap/hum`.
 
 ## What it looks like
 
 ```console
-$ hum new t3 -- t3 server
+$ hum new t3 -- t3 serve
 created /Users/me/.config/hum/services/t3.toml
 t3: started
 $ hum ls
 NAME  STATE    PID   LAST EXIT  COMMAND
-t3    running  4242  -          t3 server
+t3    running  4242  -          t3 serve
 $ hum logs t3 -f
 ```
 
@@ -26,7 +26,7 @@ $ hum logs t3 -f
 
 ```toml
 # ~/.config/hum/services/t3.toml
-command = ["t3", "server"]   # argv; a string runs through /bin/sh -c
+command = ["t3", "serve"]    # argv; a string runs through /bin/sh -c
 cwd = "~/work/t3"
 env_file = [".env"]          # relative to cwd; later files override earlier ones
 restart = "always"           # always | on-failure | never
@@ -105,15 +105,42 @@ What each command promises is in [`docs/specs/`](docs/specs/).
 
 ## Install
 
+```sh
+brew install plimeor/tap/hum
+```
+
+Releases are signed with a Developer ID certificate.
+
+### Upgrade
+
+```sh
+brew upgrade hum
+hum apply
+```
+
+Every plist runs a copy of hum at `~/Library/Application Support/hum/hum` rather than the binary Homebrew installs, whose path changes with each version. macOS ties privacy grants, such as letting a service read `~/Documents`, to that path and the signature, so a grant given once outlasts upgrades. `hum apply` makes the copy the hum you just installed, without restarting any service; each service runs the new version from its next start. Until then `hum ls` marks the services out of sync.
+
+### Uninstall
+
+```sh
+hum rm --all -y
+brew uninstall hum
+```
+
+`hum rm --all` stops every service and deletes its plist, config, and logs, and with the last one the log rotation job and the copy; `brew uninstall` alone leaves all of those behind.
+
+### From source
+
 Needs Rust 1.88 or later.
 
-```fish
+```sh
 git clone https://github.com/plimeor/hum
 cd hum
 cargo install --path .
+hum apply
 ```
 
-`cargo install` puts hum at `~/.cargo/bin/hum`, and that is the path the plists record. Reinstalling to the same place keeps services working. If you install somewhere else, run `hum apply` once; `hum doctor` reports this case too.
+A build from source has no stable signature, so macOS asks again for privacy grants after each rebuild.
 
 ### Completion
 
