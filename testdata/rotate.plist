@@ -6,12 +6,17 @@
 	<string>hum._rotate</string>
 	<key>ProgramArguments</key>
 	<array>
-		<string>/opt/homebrew/bin/hum</string>
+		<string>/Users/me/Library/Application Support/hum/hum</string>
 		<string>logs</string>
 		<string>--rotate</string>
 		<string>--all</string>
 		<string>--if-oversize</string>
 	</array>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>HUM_EXEC</key>
+		<string>/opt/homebrew/bin/hum</string>
+	</dict>
 	<key>RunAtLoad</key>
 	<false/>
 	<key>StartInterval</key>

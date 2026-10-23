@@ -16,6 +16,7 @@ use std::process::ExitCode;
 use clap::{CommandFactory, Parser};
 
 fn main() -> ExitCode {
+    app::hand_over();
     // Answers shell completion requests (COMPLETE=<shell> hum ...).
     clap_complete::CompleteEnv::with_factory(cli::Cli::command).complete();
     match cli::run(cli::Cli::parse()) {

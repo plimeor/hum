@@ -34,5 +34,8 @@ When `hum new`, `start`, or `restart`, or the automatic restart after a config c
 ### Requirement: launchd records stay bounded
 launchd keeps a permanent per-user record of every job that was ever enabled or disabled, which only root can delete. hum MUST add such a record only when `hum stop` disables a service; `start`, `restart`, `rm`, `apply`, and installing the log rotation job MUST NOT add one for a job that is not disabled.
 
+### Requirement: Launcher copy
+Every plist MUST run a copy of hum at `~/Library/Application Support/hum/hum` and name the hum path in its `HUM_EXEC` environment variable. macOS ties privacy grants such as Files and Folders to the path and signature of the program launchd starts, so a copy that stays at one path keeps them across upgrades of a hum whose signature does not change between versions; a build without a stable signature, such as one built from source, gets asked again after each upgrade. Started with `HUM_EXEC` naming another hum that can be run, hum MUST replace itself with that hum, with the same arguments and without `HUM_EXEC`; otherwise it MUST carry on itself. Whenever hum writes a plist, the copy MUST match the running hum, replaced at the same path; the copy MUST be deleted together with the last job's plist.
+
 ### Requirement: hum path in the plist
 When a stable path to the current binary exists on `PATH` (such as a package manager's symlink), the hum path written into the plist MUST be that path rather than a versioned path that breaks on upgrade.

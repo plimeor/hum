@@ -17,7 +17,7 @@ Type: feature
 `hum apply --dry-run` MUST only list the changes it would make, and MUST NOT change any file or launchd state.
 
 ### Requirement: doctor checks
-`hum doctor` MUST check that the global config is valid; that each service config is valid; that each service's assembled environment sets `PATH`, warning about each `PATH` entry that belongs to a single shell session; that `command` is found in that `PATH`; that `cwd` exists; that every `env_file` exists; that the hum path in each plist exists and is executable, warning about a versioned path that breaks on upgrade; that the config and launchd agree; that no hum plist lacks a config; that the log rotation job is installed; and that no log has grown abnormally large.
+`hum doctor` MUST check that the global config is valid; that each service config is valid; that each service's assembled environment sets `PATH`, warning about each `PATH` entry that belongs to a single shell session; that `command` is found in that `PATH`; that `cwd` exists; that every `env_file` exists; that the program each plist runs exists and is executable, warning when the hum path it hands over to is missing or is a versioned path that breaks on upgrade; that the config and launchd agree; that no hum plist lacks a config; that the log rotation job is installed; and that no log has grown abnormally large.
 
 ### Requirement: doctor exit status
 `hum doctor` MUST exit with a non-zero status when it finds an error-level problem, and with zero when it finds only warnings.

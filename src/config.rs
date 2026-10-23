@@ -89,6 +89,8 @@ pub struct Paths {
     pub config_dir: PathBuf,
     pub launch_agents: PathBuf,
     pub log_dir: PathBuf,
+    /// `~/Library/Application Support/hum`.
+    pub support_dir: PathBuf,
 }
 
 impl Paths {
@@ -117,6 +119,7 @@ impl Paths {
             config_dir: home.join(".config/hum"),
             launch_agents: home.join("Library/LaunchAgents"),
             log_dir: home.join("Library/Logs/hum"),
+            support_dir: home.join("Library/Application Support/hum"),
             home,
         }
     }
@@ -135,6 +138,13 @@ impl Paths {
 
     pub fn plist_file(&self, name: &str) -> PathBuf {
         self.launch_agents.join(format!("{}.plist", label(name)))
+    }
+
+    /// The copy of hum that every plist runs. macOS ties privacy grants
+    /// such as Files and Folders to a program's path and signature, so a
+    /// path that stays put across upgrades keeps them.
+    pub fn launcher(&self) -> PathBuf {
+        self.support_dir.join("hum")
     }
 
     pub fn log_file(&self, name: &str) -> PathBuf {
