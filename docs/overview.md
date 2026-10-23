@@ -25,15 +25,13 @@ v1: macOS only (arm64 / x64), all 14 commands. The code and tests are done. Rele
 - Upgrades: after `brew upgrade` and `hum apply`, services restart normally on the new version.
 - Privacy grants: after upgrading 0.1.0-rc.8 to rc.9 and running `hum apply`, a service reads `~/Documents` without macOS asking again.
 - launchd opens logs with `O_APPEND`, so copytruncate rotation works.
+- Reboot: after a reboot, started services come back and stopped ones do not.
 
-What remains:
-
-- Login and reboot: after logging out and back in, and after a reboot, started services come back and stopped ones do not.
-- `t3 serve` has run as the first real service (`~/.config/hum/services/t3.toml`, registered 2026-10-22) for a full week, through 2026-10-29.
+What remains: `t3 serve` has run as the first real service (`~/.config/hum/services/t3.toml`, registered 2026-10-22) for a full week, through 2026-10-29.
 
 ## Next
 
-Release v0.1.0 once both remaining checks pass.
+Release v0.1.0 once that week passes.
 
 ## Non-goals
 
