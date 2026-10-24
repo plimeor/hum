@@ -27,8 +27,6 @@ v0.1.0: macOS only (arm64 / x64), all 14 commands. Releases ship through Homebre
 - launchd opens logs with `O_APPEND`, so copytruncate rotation works.
 - Reboot: after a reboot, started services come back and stopped ones do not.
 
-`t3 serve` runs as the first real service (`~/.config/hum/services/t3.toml`, registered 2026-10-22).
-
 ## Non-goals
 
 - Linux / systemd support
