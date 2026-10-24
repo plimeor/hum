@@ -1,5 +1,5 @@
 # Project overview
-Updated 2026-10-23
+Updated 2026-10-24
 
 ## What this is
 
@@ -17,7 +17,7 @@ Shipped features are described in `docs/specs/`.
 
 ## Current focus
 
-v1: macOS only (arm64 / x64), all 14 commands. The code and tests are done. Releases ship through Homebrew (`plimeor/tap`), signed with a Developer ID certificate, and every plist runs a copy of hum at a fixed path so privacy grants outlast upgrades; after `brew upgrade`, `hum apply` refreshes the copy. On a real Mac these checks pass:
+v0.1.0: macOS only (arm64 / x64), all 14 commands. Releases ship through Homebrew (`plimeor/tap`), signed with a Developer ID certificate, and every plist runs a copy of hum at a fixed path so privacy grants outlast upgrades; after `brew upgrade`, `hum apply` refreshes the copy. On a real Mac these checks pass:
 
 - The real-launchd tests: `cargo test -- --ignored --test-threads=1 launchd::macos`.
 - Local integration: after `hum new sleeper -- sleep 1000`, `ls` shows running; after `kill -9` it is started again within 10 seconds; after `stop` it is not started again; after `rm` both the plist and the config are gone.
@@ -27,11 +27,7 @@ v1: macOS only (arm64 / x64), all 14 commands. The code and tests are done. Rele
 - launchd opens logs with `O_APPEND`, so copytruncate rotation works.
 - Reboot: after a reboot, started services come back and stopped ones do not.
 
-What remains: `t3 serve` has run as the first real service (`~/.config/hum/services/t3.toml`, registered 2026-10-22) for a full week, through 2026-10-29.
-
-## Next
-
-Release v0.1.0 once that week passes.
+`t3 serve` runs as the first real service (`~/.config/hum/services/t3.toml`, registered 2026-10-22).
 
 ## Non-goals
 
